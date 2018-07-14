@@ -1,0 +1,64 @@
+ORIGIN		=	$200		; Program load address
+MEMEND		=	$7FFF		; Last memory location to use
+
+SERIAL_BASE	=	$E000		; Base address of serial port
+
+BUFFERMAX	=	79		; Maximum number in input buffer
+
+	*=	ORIGIN
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; INCH - Input a character from ACIA.
+;
+INCH:
+	lda	Randomize	; Need to randomize random number generator?
+	beq	INCH0
+
+	jsr	GetRandom	; Generate a random number
+
+INCH0
+	lda	SERIAL_BASE	; Get status
+	and	#1		; Character available?
+
+	beq	INCH		; Not yet
+
+	lda	#0		; Only do this the very first time
+	sta	Randomize
+
+	lda	SERIAL_BASE+1	; Get char
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; OUTCH - Output a character to ACIA.
+;
+OUTCH:
+	pha			; Stash character
+
+OUTCH1:
+	lda	SERIAL_BASE	; Get status
+	and	#2		; Transmitter empty?
+	beq	OUTCH1		; Not yet
+
+	pla			; Recover character
+	sta	SERIAL_BASE+1	; Send character
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; INIT_PY - Perform any system specific initialization.
+;
+INIT_PY:
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; EXIT_PY - Perform any system specific cleanup and shutdown.
+;
+EXIT_PY:
+	rts
+
+PYTHON_BASE	=	*

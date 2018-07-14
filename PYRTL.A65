@@ -1,0 +1,9507 @@
+	include	ADAPT.I65
+
+TYPE_FUNCTION	=	$80
+TYPE_STRING	=	$81
+TYPE_BIGINT	=	$82
+TYPE_TUPLE	=	$83
+TYPE_LIST	=	$84
+TYPE_DICT	=	$85
+TYPE_BIGTUPLE	=	$86
+TYPE_BIGLIST	=	$87
+TYPE_BIGDICT	=	$88
+
+	*=	0			; Zero page!
+
+;
+; Scratch variables.
+;
+	.ds	2			; Skip C64 memory mapped registers
+
+Byt0	.ds	1			; Byte scratch variables
+Byt1	.ds	1
+Byt2	.ds	1
+Byt3	.ds	1
+
+Int0	.ds	2			; Integer scratch variables
+Int1	.ds	2
+Int2	.ds	2
+Int3	.ds	2
+Int4	.ds	2
+Int5	.ds	2
+Int6	.ds	2
+Int7	.ds	2
+
+PtrA	.ds	2			; Address scratch variables
+Ptr0	.ds	2
+Ptr1	.ds	2
+Ptr2	.ds	2
+Ptr3	.ds	2
+Ptr4	.ds	2
+Ptr5	.ds	2
+Ptr6	.ds	2
+
+Tmp0	.ds	2
+Tmp1	.ds	2
+Tmp2	.ds	2
+
+Scr0	.ds	2			; Two integer factors
+ScrLen0	.ds	2
+Scr1	.ds	2
+ScrLen1	.ds	2
+
+Scr2	.ds	2			; Integral result
+ScrLen2	.ds	2
+
+Scr3	.ds	2			; Formatted output string
+ScrLen3	.ds	2
+
+Pargs	.ds	2			; Positional args
+Kargs	.ds	2			; Keyword args
+
+?SP	.ds	1
+
+ReprStr	.ds	1			; 0 to format strings with str
+					; 1 to format strings with repr
+
+Str	.ds	2
+Var	.ds	2
+Func	.ds	2
+Value	.ds	2
+Vector	.ds	2
+
+Rand	.fcb	$65,$02			; Random number seed
+Randomize	.fcb	1		; Need to randomize
+
+msg	.macro	Contents
+&0	.fcb	&L1&$FF	; the length
+	.fcb	&L1>>8
+	.fcc	`&1`
+	.endm
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+
+	*=	PYTHON_BASE
+
+Begin	ldx	#$FF			; Load stack pointer
+	txs
+
+	jsr	INIT_PY			; Perform system specific startup
+
+	jsr	Start
+
+	jsr	EXIT_PY			; Perform system specific shutdown
+
+	.db	$FF
+
+	jsr	HeapDump
+
+	.db	$FF
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+
+Start
+	jsr	InitRTL			; Initialize run-time environment
+
+;;< Before the Python script
+
+	lda	#Pargs3&$FF		; Positional args
+	sta	Pargs
+	lda	#Pargs3>>8
+	sta	Pargs+1
+
+	lda	#T0003&$FF
+	sta	Pargs3+2
+	lda	#T0003>>8
+	sta	Pargs3+3
+
+	lda	#Z0000&$FF
+	sta	Pargs3+4
+	lda	#Z0000>>8
+	sta	Pargs3+5
+
+	lda	#D0000&$FF
+	sta	Pargs3+6
+	lda	#D0000>>8
+	sta	Pargs3+7
+
+	lda	#Kargs0&$FF		; Keyword args
+	sta	Kargs
+	lda	#Kargs0>>8
+	sta	Kargs+1
+
+	ldx	#_print&$FF		; Address of function
+	lda	#_print>>8
+	jsr	GetObject
+	jsr	object.__call__
+
+;;> After the Python script
+
+	rts
+
+	db	'Run-time library Copyright (C) DEI Research  2017, 2018.'
+	db	'All rights reserved.'
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; InitRTL - Initialize the run-time environment.
+;
+; Input:
+;	The symbol BSS is the base of uninitialized variable storage.
+;	The symbol Heap is the base of the heap.
+;	MEMEND is the last available memory location.
+;
+; Output:
+;	The memory between BSS and Heap is filled with zero.
+;	The heap is created.
+;
+; Uses:
+;	Int0 - general counter
+;	Ptr0 - pointer to heap base, general pointer
+;	Ptr1 - pointer to free memory
+;	Ptr2 - pointer to end of heap
+;
+;
+; The heap consists of a series of memory blocks.  Each one starts with an
+; arena header:
+;
+; +-------------+---------------+---------------+-----------------------+
+; +   2	bytes	+     2	bytes	+     1	byte	+     N	bytes		+
+; +		+		+		+			+
+; +	Next	+	Size	+   References	+	Block		+
+; +-------------+---------------+---------------+-----------------------+
+;
+; Next is the address of the next block or 0 in case of the last block.
+;
+; Size is the number of available bytes in the block.  May be zero.
+;
+; References is the count of references.
+;	0 signifies a free block.
+;	$FF signifies a block not to be freed.
+;
+; The first and last blocks mark the bounds of the heap.
+;
+InitRTL
+	tsx				; Save stack pointer
+	inx				;   the way the caller sees it
+	inx
+	stx	?SP
+
+	lda	#0			; Format strings with str
+	sta	ReprStr
+
+	lda	#Heap&$FF		; Anything in BSS?
+	sec
+	sbc	#BSS&$FF
+	sta	Int0
+	lda	#Heap>>8
+	sbc	#BSS>>8
+	sta	Int0+1
+	ora	Int0
+	beq	InitRTL0
+
+	lda	#BSS&$FF		; Fill BSS with zero
+	sta	Ptr0
+	lda	#BSS>>8
+	sta	Ptr0+1
+	lda	#0
+	jsr	SetBlk
+
+InitRTL0
+	lda	#Heap&$FF		; Ptr0 -> base of the heap
+	sta	Ptr0
+	lda	#Heap>>8
+	sta	Ptr0+1
+	lda	#(Heap+5)&$FF		; Ptr1 -> free memory chunk
+	sta	Heap			; Begin^.next := @Free
+	sta	Ptr1
+	lda	#(Heap+5)>>8
+	sta	Heap+1
+	sta	Ptr1+1
+	lda	#(MEMEND-4)&$FF		; Ptr2 -> end of the heap
+	sta	HeapE
+	sta	Ptr2
+	lda	#(MEMEND-4)>>8
+	sta	HeapE+1
+	sta	Ptr2+1
+	lda	#0
+	ldy	#0
+	sta	(Ptr2),Y		; End^.next := nil
+	iny
+	sta	(Ptr2),Y
+	iny
+	sta	(Ptr2),Y		; End^.size := 0
+	sta	(Ptr0),Y		; Begin^.Size := 0
+	iny
+	sta	(Ptr2),Y
+	sta	(Ptr0),Y
+	iny
+	sta	(Ptr1),Y		; Free^.ref := 0
+	lda	#$FF
+	sta	(Ptr2),Y		; End^.ref := max
+	sta	(Ptr0),Y		; Begin^.ref := max
+	ldy	#0
+	lda	Ptr2
+	sta	(Ptr1),Y		; Free^.next := @End
+	iny
+	lda	Ptr2+1
+	sta	(Ptr1),Y
+	iny
+	sec
+	lda	Ptr2
+	sbc	#(Heap+5+5)&$FF		; Free^.size := @End - @Begin - 5 - 5
+	sta	(Ptr1),Y
+	iny
+	lda	Ptr2+1
+	sbc	#(Heap+5+5)>>8
+	sta	(Ptr1),Y
+
+	lda	#6			; Allocate 6 bytes for factor
+	sta	Int0
+	sta	ScrLen0
+	lda	#0
+	sta	Int0+1
+	sta	ScrLen0+1
+	jsr	Alloc
+	lda	Ptr0
+	sta	Scr0
+	lda	Ptr0+1
+	sta	Scr0+1
+
+	lda	#6			; Allocate 6 bytes for another factor
+	sta	Int0
+	sta	ScrLen1
+	lda	#0
+	sta	Int0+1
+	sta	ScrLen1+1
+	jsr	Alloc
+	lda	Ptr0
+	sta	Scr1
+	lda	Ptr0+1
+	sta	Scr1+1
+
+	lda	#10			; Allocate 10 bytes for the result
+	sta	Int0
+	sta	ScrLen2
+	lda	#0
+	sta	Int0+1
+	sta	ScrLen2+1
+	jsr	Alloc
+	lda	Ptr0
+	sta	Scr2
+	lda	Ptr0+1
+	sta	Scr2+1
+
+	lda	#15			; Allocate 15 bytes for the output str
+	sta	Int0
+	sta	ScrLen3
+	lda	#0
+	sta	Int0+1
+	sta	ScrLen3+1
+	jsr	Alloc
+	lda	Ptr0
+	sta	Scr3
+	lda	Ptr0+1
+	sta	Scr3+1
+
+;;r Before the reinit code
+	lda	Zero_List		; Get list of variables to zero
+	sta	Ptr0
+	lda	Zero_List+1
+	sta	Ptr0+1
+
+InitRTL1
+	ora	Ptr0
+	beq	InitRTL2		; No more uninitialized variables
+
+	lda	#0			; Zero out this variable
+	ldy	#2			; Point to the variable
+	sta	(Ptr0),Y
+	iny
+	sta	(Ptr0),Y
+
+	ldy	#0
+	lda	(Ptr0),Y
+	tax
+	iny
+	lda	(Ptr0),y
+	sta	Ptr0+1
+	stx	Ptr0
+
+	jmp	InitRTL1
+
+InitRTL2
+	lda	Init_List		; Get list of variables to initialize
+	sta	Ptr0
+	lda	Init_List+1
+	sta	Ptr0+1
+
+InitRTL3
+	ora	Ptr0
+	beq	InitRTL4		; No more initialized variables
+
+	ldy	#2			; Load variable value
+	lda	(Ptr0),Y
+	tax
+	iny
+	lda	(Ptr0),Y
+
+	iny				; Store variable value
+	sta	(Ptr0),Y
+	iny
+	txa
+	sta	(Ptr0),Y
+
+	ldy	#0
+	lda	(Ptr0),Y
+	tax
+	iny
+	lda	(Ptr0),y
+	sta	Ptr0+1
+	stx	Ptr0
+
+	jmp	InitRTL3
+
+InitRTL4
+;;r After the reinit code
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; sys.exit - Exit the program.
+;
+; Input:
+;	?SP = the saved stack pointer
+;
+; Output:
+;	The program is terminated.
+;
+sys.exit
+	ldx	?SP			; Load top level stack pointer
+	txs
+
+	rts				; Exit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; SetBlk - Fill a block of memory.
+;
+; Input:
+;	Ptr0 = the base address of the block
+;	Int0 = the length of the block
+;	register A = the fill value
+;
+; Output:
+;	The block is filled.
+;
+SetBlk
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	SetBlk0			; Branch if no
+
+	ldx	#0			; Set up to fill an entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	SetBlk1
+
+SetBlk0
+	ldx	Int0			; Any remaining on a partial page?
+	beq	SetBlk2			; No
+
+	sty	Int0			; This will finish the partial page
+
+SetBlk1
+	sta	(Ptr0),Y		; Store the value
+	iny
+	dex				; More to fill on this page?
+	bne	SetBlk1			; Yes
+
+	inc	Ptr0+1			; Address next page
+
+	jmp	SetBlk			; Check for another page
+
+SetBlk2
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; MovBlk - Move a block of memory (not overlapping.)
+;
+; Input:
+;	Ptr0 = the base address of the block
+;	Ptr1 = the destination address
+;	Int0 = the length of the block
+;
+; Output:
+;	The block is moved.
+;	Register A contains the last byte copied
+;
+MovBlk	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	MovBlk0			; Branch if no
+
+	ldx	#0			; Set up to move an entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	MovBlk1
+
+MovBlk0	ldx	Int0			; Any remaining on a partial page?
+	beq	MovBlk2			; No
+
+	sty	Int0			; This will finish the partial page
+
+MovBlk1	lda	(Ptr0),Y		; Move a byte
+	sta	(Ptr1),Y
+	iny
+	dex				; More to move on this page?
+	bne	MovBlk1			; Yes
+
+	inc	Ptr0+1			; Address next page
+	inc	Ptr1+1
+
+	jmp	MovBlk			; Check for another page
+
+MovBlk2	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Alloc - Allocate a block of memory.
+;
+; Input:
+;	Int0 = requested size
+;
+; Output:
+;	Ptr0 = the address of the allocated block (not arena header)
+;
+; Uses:
+;	Int1, Ptr1
+;
+Alloc	lda	Int0			; Is the size zero?
+	ora	Int0+1
+	bne	Alloc0
+
+	jmp	Alloc5
+
+Alloc0	lda	Heap			; Start at the base of the heap
+	sta	Ptr0
+	lda	Heap+1
+	sta	Ptr0+1
+
+Alloc1	ldy	#4
+	lda	(Ptr0),Y		; Get reference count
+	bne	Alloc4			; Branch if block is in use
+
+	ldy	#2			; Compare block size with request
+	lda	(Ptr0),Y
+	sec
+	sbc	Int0
+	sta	Int1
+	iny
+	lda	(Ptr0),Y
+	sbc	Int0+1
+	bcc	Alloc4			; Branch if not big enough
+
+	sta	Int1+1			; Save size of remainder
+
+	bne	Alloc2			; Block is big enough to split
+	lda	Int1
+	cmp	#5
+	bcc	Alloc3			; Branch if no room for another header
+
+Alloc2	lda	Ptr0			; Determine base of new free block
+	clc
+	adc	Int0
+	sta	Ptr1
+	lda	Ptr0+1
+	adc	Int0+1
+	sta	Ptr1+1
+	clc
+	lda	Ptr1
+	adc	#5
+	sta	Ptr1
+	lda	Ptr1+1
+	adc	#0
+	sta	Ptr1+1
+
+	ldy	#0			; Set next link from free block
+	lda	(Ptr0),Y
+	sta	(Ptr1),Y
+	lda	Ptr1			; And link to the free block
+	sta	(Ptr0),Y
+	iny
+	lda	(Ptr0),Y
+	sta	(Ptr1),Y
+	lda	Ptr1+1			; And link to the free block
+	sta	(Ptr0),Y
+
+	iny				; Set block size
+	lda	Int0
+	sta	(Ptr0),Y
+	iny
+	lda	Int0+1
+	sta	(Ptr0),Y
+
+	dey				; Determine free block size
+	lda	Int1
+	sec
+	sbc	#5
+	sta	(Ptr1),Y
+	iny
+	lda	Int1+1
+	sbc	#0
+	sta	(Ptr1),Y
+
+	iny				; Clear reference count
+	lda	#0
+	sta	(Ptr1),Y
+
+Alloc3	ldy	#4			; Set reference count
+	lda	#1
+	sta	(Ptr0),Y
+
+	clc				; Point to block instead of arena
+	lda	Ptr0
+	adc	#5
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	rts
+
+Alloc4	ldy	#0			; Next is 0 at end of heap
+	lda	(Ptr0),Y
+	tax
+	iny
+	ora	(Ptr0),Y
+	beq	Alloc5
+
+	lda	(Ptr0),Y		; Go to the next arena
+	sta	Ptr0+1
+	stx	Ptr0
+
+	jmp	Alloc1
+
+Alloc5	sta	Ptr0
+	sta	Ptr0+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; DeRef - Remove a reference to a block of memory.
+;
+; Input:
+;	A:X = address of the block (not arena header)
+;
+; Output:
+;	The reference count of the block is decremented.  The block is freed
+;		if the count becomes 0.
+;
+; Uses:
+;	Ptr0
+;	Ptr1
+;
+DeRef	sta	Ptr0+1
+	stx	Ptr0
+	txa				; Invalid if outside of the heap
+	clc
+	sbc	#Heap&$FF
+	lda	Ptr0+1
+	sbc	#Heap>>8
+	bcc	DeRef0			; Do not attempt to count if invalid
+
+	lda	Ptr0			; Point to arena header of the block
+;	sec
+	sbc	#5
+	sta	Ptr1
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#4			; Get reference count
+	lda	(Ptr1),Y
+
+	cmp	#$FF			; If it is the max, leave it there
+	beq	DeRef0
+
+	sec				; Decrement the count
+	sbc	#1
+	sta	(Ptr1),Y
+	beq	Free
+;	bne	DeRef0
+;
+;	jsr	Free
+
+DeRef0	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Free - Free a block of memory.
+;
+; Input:
+;	Ptr0 = address of the block (not arena header)
+;
+; Output:
+;	The block is freed.
+;
+; Uses:
+;	Ptr1
+;
+Free	lda	Ptr0			; Invalid if outside of the heap
+	clc
+	sbc	#Heap&$FF
+	lda	Ptr0+1
+	sbc	#Heap>>8
+	bcs	Free0
+
+	jmp	Free5			; Do not attempt to free if invalid
+
+Free0	lda	Ptr0			; Point to arena header of the block
+;	sec
+	sbc	#5
+	sta	Ptr0
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr0+1
+
+	lda	#Heap&$FF		; Start at the base of the heap
+	sta	Ptr1
+	lda	#Heap>>8
+	sta	Ptr1+1
+
+Free1	ldy	#0			; Compare next with block to be freed
+	lda	(Ptr1),Y
+	cmp	Ptr0
+	bne	Free2
+	iny
+	lda	(Ptr1),Y
+	cmp	Ptr0+1
+	beq	Free3
+	dey
+
+Free2	lda	(Ptr1),Y		; Next is 0 at end of heap
+	tax
+	iny
+	ora	(Ptr1),Y
+	beq	Free5
+
+	lda	(Ptr1),Y		; Go to the next arena
+	sta	Ptr1+1
+	stx	Ptr1
+
+	jmp	Free1			; And try again
+
+Free3	ldy	#4			; Mark block free
+	lda	#0
+	sta	(Ptr0),Y
+
+	lda	(Ptr1),Y		; If previous block is free, merge
+	bne	Free4
+
+	ldy	#0			; Copy next link
+	lda	(Ptr0),Y
+	sta	(Ptr1),Y
+	iny
+	lda	(Ptr0),Y
+	sta	(Ptr1),Y
+
+	iny				; Adjust length by size of freed block
+	lda	(Ptr0),Y
+	clc
+	adc	(Ptr1),Y
+	sta	(Ptr1),Y
+	iny
+	lda	(Ptr0),Y
+	adc	(Ptr1),Y
+	sta	(Ptr1),Y
+	dey				; And its header
+	lda	(Ptr1),Y
+	clc
+	adc	#5
+	sta	(Ptr1),Y
+	iny
+	lda	(Ptr1),Y
+	adc	#0
+	sta	(Ptr1),Y
+
+	lda	Ptr1			; This is the new base arena
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+Free4   ldy	#0			; Address next block
+	lda	(Ptr0),Y
+	sta	Ptr1
+	iny
+	lda	(Ptr0),Y
+	sta	Ptr1+1
+
+	ldy	#4			; If next block is free, merge
+	lda	(Ptr1),Y
+	bne	Free5
+
+	ldy	#0			; Copy next link
+	lda	(Ptr1),Y
+	sta	(Ptr0),Y
+	iny
+	lda	(Ptr1),Y
+	sta	(Ptr0),Y
+
+	iny				; Adjust length by size of freed block
+	lda	(Ptr1),Y
+	clc
+	adc	(Ptr0),Y
+	sta	(Ptr0),Y
+	iny
+	lda	(Ptr1),Y
+	adc	(Ptr0),Y
+	sta	(Ptr0),Y
+	dey				; And its header
+	lda	(Ptr0),Y
+	clc
+	adc	#5
+	sta	(Ptr0),Y
+	iny
+	lda	(Ptr0),Y
+	adc	#0
+	sta	(Ptr0),Y
+
+Free5	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; AddRef - Add a reference to a block of memory.
+;
+; Input:
+;	PtrA = address of the block (not arena header)
+;
+; Output:
+;	The reference count of the block is incremented.
+;
+; Uses:
+;	Ptr1
+;
+AddRef	lda	PtrA			; Invalid if outside of the heap
+	clc
+	sbc	#Heap&$FF
+	lda	PtrA+1
+	sbc	#Heap>>8
+	bcc	AddRef1			; Do not attempt to count if invalid
+
+	lda	PtrA			; Point to arena header of the block
+;	sec
+	sbc	#5
+	sta	Ptr1
+	lda	PtrA+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#4			; Get reference count
+	lda	(Ptr1),Y
+	clc				; Increment the count
+	adc	#1
+	bne	AddRef0
+
+	lda	#$FF			; If it was the max, leave it there
+
+AddRef0	sta	(Ptr1),Y
+
+AddRef1	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; HeapDump
+;
+; Input:
+;	Heap address
+;
+; Output:
+;	Dump generated
+;
+; Uses:
+;       Ptr0
+;
+HeapDump
+	lda	#Heap&$FF		; Ptr0 -> heap
+	sta	Ptr0
+	lda	#Heap>>8
+	sta	Ptr0+1
+
+HeapDump1
+	lda	Ptr0+1			; Display arena address
+	jsr	HDByte
+	lda	Ptr0
+	jsr	HDByte
+
+	lda	#' '
+	jsr	OUTCH
+
+	ldy	#1			; Display next
+	lda	(Ptr0),Y
+	jsr	HDByte
+	dey
+	lda	(Ptr0),Y
+	jsr	HDByte
+
+	lda	#' '
+	jsr	OUTCH
+
+	ldy	#3			; Display size
+	lda	(Ptr0),Y
+	jsr	HDByte
+	dey
+	lda	(Ptr0),Y
+	jsr	HDByte
+
+	lda	#' '
+	jsr	OUTCH
+
+	ldy	#4			; Display references
+	lda	(Ptr0),Y
+	jsr	HDByte
+
+	jsr	PCRLF
+
+	ldy	#0			; next is 0 at end of heap
+	lda	(Ptr0),Y
+	tax
+	iny
+	ora	(Ptr0),Y
+	beq	HeapDump2
+
+	lda	(Ptr0),Y		; Go to the next arena
+	sta	Ptr0+1
+	stx	Ptr0
+
+	and	Ptr0
+	cmp	#$FF
+	bne	HeapDump1		; And repeat
+
+	ldx	#BadHeap&$FF
+	lda	#BadHeap>>8
+	jsr	sys.stdout.write
+
+	.db	$FF
+
+HeapDump2
+	rts
+
+BadHeap	msg	"Heap is corrupt."
+
+HDByte
+	pha				; Save byte
+
+	lsr	A			; Isolate upper nybble
+	lsr	A
+	lsr	A
+	lsr	A
+
+	jsr	HDNybble
+
+	pla				; Recover byte
+
+	and	#$F			; Isolate lower nybble
+
+HDNybble
+	tax				; Get corresponding hex digit
+	lda	Hex,X
+
+	jsr	OUTCH
+
+	rts
+
+Hex	fcc	'0123456789ABCDEF'
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__bool__
+;
+; Input:
+;	A:X = address of the object
+;
+; Output:
+;	A:X = address of True or False
+;	Zero flag set if false
+;
+; Uses:
+;       Ptr0
+;
+object.__bool__
+	stx	Ptr0
+	sta	Ptr0+1
+
+	ldy	#0
+	lda	(Ptr0),Y
+	beq	object.__bool__False	; None is False
+
+	cmp	#$C0			; True?
+	beq	object.__bool__True
+
+	cmp	#$40			; False?
+	beq	object.__bool__False
+
+	cmp	#$41			; Single-byte integer?
+	bne	object.__bool__0
+
+	iny
+	lda	(Ptr0),Y		; Get byte of integer
+	beq	object.__bool__False	; False if 0
+
+	jmp	object.__bool__True	; True otherwise
+
+object.__bool__0
+	and	#$40			; Any other small integer?
+	bne	object.__bool__True	; True if so
+
+	lda	(Ptr0),Y		; Get object type
+
+	cmp	#TYPE_STRING		; Is it a string?
+	bne	object.__bool__1
+
+	iny				; True if length > 0
+	lda	(Ptr0),Y
+	bne	object.__bool__True
+	iny
+	lda	(Ptr0),Y
+	bne	object.__bool__True
+
+	jmp	object.__bool__False	; False otherwise
+
+object.__bool__1
+	;;; Anything else is true for now
+
+object.__bool__True
+	ldx	#True&$FF
+	lda	#True>>8
+
+	jmp	object.__bool__Done
+
+object.__bool__False
+	ldx	#False&$FF
+	lda	#False>>8
+
+object.__bool__Done
+	cpx	#False&$FF		; Set Zero flag if false
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IDivMod - Integer division
+;
+; Input:
+;	Scr0 = address of buffer containing the dividend
+;	Scr1 = address of buffer containing the divisor
+;	Scr2 = address of buffer to contain the quotient
+;	Int0 = the number of bytes in each number
+;
+; Output:
+;	Scr0 = address of buffer containing the remainder
+;	Scr2 = address of buffer containing the quotient
+;
+; Uses:
+;	Ptr0 - pointer to dividend
+;	Ptr1 - pointer to divisor
+;	Ptr2 - pointer to quotient
+;	Int1 - the number of bytes in each number
+;	Int2 - shift counter
+;
+; Assumptions:
+;	* Divisor is not 0
+;	* Both numbers are positive
+;
+IDivMod
+	lda	Int0			; Keep byte count in Int1
+	sta	Int1
+	lda	Int0+1
+	sta	Int1+1
+
+	lda	Scr2			; Initial quotient is 0
+	sta	Ptr0
+	lda	Scr2+1
+	sta	Ptr0+1
+
+	lda	#0
+
+	jsr	SetBlk
+
+	lda	#1			; Count how many times to subtract
+	sta	Int2
+	lda	#0
+	sta	Int2+1
+
+	lda     Scr1			; Point Ptr1 to MSB of divisor
+	sec
+	sbc	#1
+	sta	Ptr1
+	lda	Scr1+1
+	sbc	#0
+	sta	Ptr1+1
+	lda	Ptr1
+	clc
+	adc	Int1
+	sta	Ptr1
+	lda	Ptr1+1
+	adc	Int1+1
+	sta	Ptr1+1
+
+IdivMod0
+	ldy	#0			; Shift the divisor all the way left
+	lda	(Ptr1),Y
+	and	#$40
+	bne	IDivMod1
+
+	lda     Scr1
+	sta	Ptr0
+	lda	Scr1+1
+	sta	Ptr0+1
+	lda	Int1
+	sta	Int0
+	lda	Int1+1
+	sta	Int0+1
+	jsr	IntSHL
+
+	lda	Int2			; Count the shift
+	clc
+	adc	#1
+	sta	Int2
+	lda	Int2+1
+	adc	#0
+	sta	Int2+1
+
+	jmp	IDivMod0
+
+IDivMod1
+	lda     Scr2			; Shift the quotient left 1 bit
+	sta	Ptr0
+	lda	Scr2+1
+	sta	Ptr0+1
+	lda	Int1
+	sta	Int0
+	lda	Int1+1
+	sta	Int0+1
+	jsr	IntSHL
+
+	lda	Scr0			; Ptr0 -> dividend
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Scr1			; Ptr1 -> divisor
+	sta	Ptr1
+	lda	Scr1+1
+	sta	Ptr1+1
+	lda	Int1
+	sta	Int0
+	lda	Int1+1
+	sta	Int0+1
+	jsr	IntSub			; Subtract divisor
+
+	bcs     IDivMod2		; Dividend big enough?
+
+	lda	Scr0			; Ptr0 -> dividend
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Scr1			; Ptr1 -> divisor
+	sta	Ptr1
+	lda	Scr1+1
+	sta	Ptr1+1
+	lda	Int1
+	sta	Int0
+	lda	Int1+1
+	sta	Int0+1
+	jsr	IntAdd			; Add it back
+
+	jmp	IDivMod3
+
+IDivMod2
+	ldy	#0			; Add one to quotient
+	lda	(Scr2),Y
+	ora	#1
+	sta	(Scr2),Y
+
+IDivMod3
+	lda     Scr1			; Shift divisor to the right
+	sta	Ptr0
+	lda	Scr1+1
+	sta	Ptr0+1
+	lda	Int1
+	sta	Int0
+	lda	Int1+1
+	sta	Int0+1
+	jsr	IntSHR
+
+	lda	Int2			; And repeat until divisor is unary
+	sec
+	sbc	#1
+	sta	Int2
+	lda	Int2+1
+	sbc	#0
+	sta	Int2+1
+	ora	Int2
+
+	bne	IDivMod1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntSHL - Shift an integer left one bit.
+;
+; Input:
+;	Ptr0 = address of the LSB of the integer
+;	Int0 = number of bytes in the integer
+;
+; Output:
+;	The integer is shifted one bit to the left
+;
+IntSHL
+	clc				; Shift a zero in from the right
+
+IntSHL0
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	IntSHL1			; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IntSHL2
+
+IntSHL1
+	ldx	Int0			; Any remaining on a partial page?
+	beq	IntSHL3			; No
+
+	sty	Int0			; This will finish the partial page
+
+IntSHL2
+	lda	(Ptr0),Y		; Shift one bit
+	rol	A
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	IntSHL2			; Yes
+
+	inc	Ptr0+1			; Address next page
+
+	jmp	IntSHL0			; Check for another page
+
+IntSHL3
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntSHR - Shift an integer right one bit.
+;
+; Input:
+;	Ptr0 = address of the LSB of the integer
+;	Int0 = number of bytes in the integer
+;
+; Output:
+;	The integer is shifted one bit to the right
+;
+IntSHR
+	lda     Ptr0+1			; Address the last page
+	clc
+	adc	Int0+1
+	sta	Ptr0+1
+	ldy	#$FF
+	lda	Int0			; Any remaining on a partial page?
+	beq	IntSHR1
+
+	tax
+	tay				; Address the last byte
+	dey
+
+	clc				; Shift a zero in from the left
+
+IntSHR0
+	lda	(Ptr0),Y		; Shift one bit
+	ror	A
+	sta	(Ptr0),Y
+	dey
+	dex				; More to do on this page?
+	bne	IntSHR0			; Yes
+
+IntSHR1
+	lda	Int0+1			; At least one full page remaining?
+	beq	IntSHR2			; Branch if no
+
+	dec	Ptr0+1			; Go to previous page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IntSHR0
+
+IntSHR2
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntSub - Subtract an integer from another.
+;
+; Input:
+;	Ptr0 = address of first number
+;	Ptr1 = address of number to subtract
+;	Int0 = number of bytes in the integer
+;
+; Output:
+;	Ptr0 = address of the difference
+;
+; Uses:
+;
+;
+IntSub
+	sec				; Start with no borrow
+
+IntSub0
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	IntSub1			; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IntSub2
+
+IntSub1
+	ldx	Int0			; Any remaining on a partial page?
+	beq	IntSub3			; No
+
+	sty	Int0			; This will finish the partial page
+
+IntSub2
+	lda	(Ptr0),Y
+	sbc	(Ptr1),Y
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	IntSub2			; Yes
+
+	inc	Ptr0+1			; Address next page
+	inc	Ptr1+1
+
+	jmp	IntSub0			; Check for another page
+
+IntSub3
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntAdd - Add an integer to another.
+;
+; Input:
+;	Ptr0 = address of first number
+;	Ptr1 = address of number to add
+;	Int0 = number of bytes in the integer
+;
+; Output:
+;	Ptr0 = address of the sum
+;
+; Uses:
+;
+;
+IntAdd
+	clc				; Start with no carry
+
+IntAdd0
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	IntAdd1			; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IntAdd2
+
+IntAdd1
+	ldx	Int0			; Any remaining on a partial page?
+	beq	IntAdd3			; No
+
+	sty	Int0			; This will finish the partial page
+
+IntAdd2
+	lda	(Ptr0),Y
+	adc	(Ptr1),Y
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	IntAdd2			; Yes
+
+	inc	Ptr0+1			; Address next page
+	inc	Ptr1+1
+
+	jmp	IntAdd0			; Check for another page
+
+IntAdd3
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntAnd - And an integer to another.
+;
+; Input:
+;	Ptr0 = address of first number
+;	Ptr1 = address of number to and
+;	Int0 = number of bytes in the integer
+;
+; Output:
+;	Ptr0 = address of the result
+;
+; Uses:
+;
+;
+IntAnd
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	IntAnd0			; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IntAnd1
+
+IntAnd0
+	ldx	Int0			; Any remaining on a partial page?
+	beq	IntAnd2			; No
+
+	sty	Int0			; This will finish the partial page
+
+IntAnd1
+	lda	(Ptr0),Y
+	and	(Ptr1),Y
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	IntAnd1			; Yes
+
+	inc	Ptr0+1			; Address next page
+	inc	Ptr1+1
+
+	jmp	IntAnd			; Check for another page
+
+IntAnd2
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntOr - Or an integer to another.
+;
+; Input:
+;	Ptr0 = address of first number
+;	Ptr1 = address of number to or
+;	Int0 = number of bytes in the integer
+;
+; Output:
+;	Ptr0 = address of the result
+;
+; Uses:
+;
+;
+IntOr
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	IntOr0			; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IntOr1
+
+IntOr0
+	ldx	Int0			; Any remaining on a partial page?
+	beq	IntOr2			; No
+
+	sty	Int0			; This will finish the partial page
+
+IntOr1
+	lda	(Ptr0),Y
+	ora	(Ptr1),Y
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	IntOr1			; Yes
+
+	inc	Ptr0+1			; Address next page
+	inc	Ptr1+1
+
+	jmp	IntOr			; Check for another page
+
+IntOr2
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntXor - Xor an integer to another.
+;
+; Input:
+;	Ptr0 = address of first number
+;	Ptr1 = address of number to xor
+;	Int0 = number of bytes in the integer
+;
+; Output:
+;	Ptr0 = address of the result
+;
+; Uses:
+;
+;
+IntXor
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	IntXor0			; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IntXor1
+
+IntXor0
+	ldx	Int0			; Any remaining on a partial page?
+	beq	IntXor2			; No
+
+	sty	Int0			; This will finish the partial page
+
+IntXor1
+	lda	(Ptr0),Y
+	eor	(Ptr1),Y
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	IntXor1			; Yes
+
+	inc	Ptr0+1			; Address next page
+	inc	Ptr1+1
+
+	jmp	IntXor			; Check for another page
+
+IntXor2
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntNegate - Negate an integer
+;
+; Input:
+;	Ptr0 = address of number
+;	Int0 = number of bytes in the integer
+;
+IntNegate
+	sec				; Add one after notting
+
+IntNegate0
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	IntNegate1		; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IntNegate2
+
+IntNegate1
+	ldx	Int0			; Any remaining on a partial page?
+	beq	IntNegate3		; No
+
+	sty	Int0			; This will finish the partial page
+
+IntNegate2
+	lda	(Ptr0),Y
+	eor	#$FF			; Not it first
+	adc	#0
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	IntNegate2		; Yes
+
+	inc	Ptr0+1			; Address next page
+
+	jmp	IntNegate0		; Check for another page
+
+IntNegate3
+	rts
+
+M_OutOfMemory	msg	"Out of memory"
+M_DivideByZero	msg	"ZeroDivisionError: integer division or modulo by zero"
+M_NotDef	msg	"NameError: name '"
+M_NotDef2	msg	"' is not defined"
+M_TypeError	msg	"TypeError: "
+M_ValueError	msg	"ValueError: "
+M_NotFunc2	msg	"' object is not callable"
+M_NotKeyword	msg	"' is an invalid keyword argument for this function"
+M_UnexpectedKey	msg	"() got an unexpected keyword argument '"
+M_Takes		msg	"() takes "
+M_TakesAtMost	msg	"() takes at most "
+M_Parg		msg	" positional argument(s) but "
+M_Arg		msg	" arguments ("
+M_Given		msg	" given"
+M_CantInterpret	msg	"() cannot interpret '"
+M_AsInteger	msg	"' object as an integer"
+M_None		msg	'NoneType'
+M_True		msg	'True'
+M_False		msg	'False'
+M_Bool		msg	"bool"
+M_Int		msg	"int"
+M_Function	msg	"function"
+M_Builtin	msg	"builtin_function_or_method"
+M_Str		msg	"str"
+M_Tuple		msg	"tuple"
+M_List		msg	"list"
+M_Dictionary	msg	"dictionary"
+M_Unknown	msg	"unknown"
+M_UnsupTypes	msg	"unsupported operand type(s) for "
+M_Quote		msg	"'"
+M_QuoteAndQuote	msg	"' and '"
+M_Plus		msg	"+"
+M_Minus		msg	"-"
+M_Times		msg	"*"
+M_Floordiv	msg	"//"
+M_Mod		msg	"%"
+M_And		msg	"&"
+M_Or		msg	"|"
+M_Xor		msg	"^"
+M_Close		msg	")"
+M_ColonQuote	msg	": '"
+M_CantConvert	msg	"Can't convert '"
+M_CantConvert2	msg	"' object to str implicitly"
+M_Unorderable	msg	"unorderable types: "
+M_LE		msg	" <= "
+M_LT		msg	" < "
+M_GE		msg	" >= "
+M_GT		msg	" > "
+M_CantMultiply	msg	"can't multiple sequence by non-int of type '"
+M_StartBigger	msg	"start value bigger than end"
+M_MustBeStringOrNum	msg	"() argument must be a string or a number, not '""
+M_NonString	msg	"() can't convert non-string with explicit base"
+M_BadBase	msg	"() base must be >= 2 and <= 36"
+M_InvalidLiteral	msg	"invalid literal for "
+M_WithBase	msg	"() with base "
+M_ColonSpaceQuote	msg	": '"
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Report out of memory
+;
+; Input:
+;
+OutOfMemory
+	ldx	#M_OutOfMemory&$FF
+	lda	#M_OutOfMemory>>8
+	jsr	PutStrCRLF
+
+	jmp	sys.exit		; Exit the program
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Report divide by zero
+;
+; Input:
+;
+DivideByZero
+	ldx	#M_DivideByZero&$FF
+	lda	#M_DivideByZero>>8
+	jsr	PutStrCRLF
+
+	jmp	sys.exit		; Exit the program
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Classify a variable
+;
+; Input:
+;	Var = address of the variable
+;
+VarType
+	ldy	#0
+	lda	(Var),Y
+	bne	VarType0		; Branch if not None
+
+	ldx	#M_None&$FF
+	lda	#M_None>>8
+	jmp	sys.stdout.write
+
+VarType0
+	cmp	#$C0			; True?
+	bne	VarType2
+
+VarType1
+	ldx	#M_Bool&$FF
+	lda	#M_Bool>>8
+	jmp	sys.stdout.write
+
+VarType2
+	cmp	#$40			; False?
+	beq	VarType1
+
+	tax
+	and	#$40			; Integer?
+	beq	VarType4
+
+VarType3
+	ldx	#M_Int&$FF
+	lda	#M_Int>>8
+	jmp	sys.stdout.write
+
+VarType4
+	txa
+	cmp	#TYPE_BIGINT		; Big integer?
+	beq	VarType3
+
+	cmp	#TYPE_FUNCTION		; Function?
+	bne	VarType6
+
+	ldy	#9			; Built-in?
+	lda	(Var),Y
+	cmp	#'b'
+	bne	VarType5
+
+	ldx	#M_Builtin&$FF
+	lda	#M_Builtin>>8
+	jmp	sys.stdout.write
+
+VarType5
+	ldx	#M_Function&$FF
+	lda	#M_Function>>8
+	jmp	sys.stdout.write
+
+VarType6
+	cmp	#TYPE_STRING		; String?
+	bne	VarType7
+
+	ldx	#M_Str&$FF
+	lda	#M_Str>>8
+	jmp	sys.stdout.write
+
+VarType7
+	cmp	#TYPE_TUPLE		; Tuple?
+	beq	VarType8
+
+	cmp	#TYPE_BIGTUPLE
+	bne	VarType9
+
+VarType8
+	ldx	#M_Tuple&$FF
+	lda	#M_Tuple>>8
+	jmp	sys.stdout.write
+
+VarType9
+	cmp	#TYPE_LIST		; List?
+	beq	VarType10
+
+	cmp	#TYPE_BIGLIST
+	bne	VarType11
+
+VarType10
+	ldx	#M_List&$FF
+	lda	#M_List>>8
+	jmp	sys.stdout.write
+
+VarType11
+	cmp	#TYPE_DICT		; Dictionary?
+	beq	VarType12
+
+	cmp	#TYPE_BIGDICT
+	bne	VarType13
+
+VarType12
+	ldx	#M_Dictionary&$FF
+	lda	#M_Dictionary>>8
+	jmp	sys.stdout.write
+
+VarType13
+	ldx	#M_Unknown&$FF
+	lda	#M_Unknown>>8
+	jmp	sys.stdout.write
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Report unsupported operand types
+;
+; Input:
+;	A:X = address of the string describing the failing operation
+;	Ptr0, Ptr1 = address of the offending variables
+;
+Unsupported
+	stx	Var
+	sta	Var+1
+
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	#M_UnsupTypes&$FF
+	lda	#M_UnsupTypes>>8
+	jsr	sys.stdout.write
+
+	ldx	Var
+	lda	Var+1
+	jsr	sys.stdout.write
+
+	ldx	#M_ColonQuote&$FF
+	lda	#M_ColonQuote>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	stx	Var
+	lda	Ptr0+1
+	sta	Var+1
+	jsr	VarType
+
+	ldx	#M_QuoteAndQuote&$FF
+	lda	#M_QuoteAndQuote>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr1
+	stx	Var
+	lda	Ptr1+1
+	sta	Var+1
+	jsr	VarType
+
+	ldx	#M_Quote&$FF
+	lda	#M_Quote>>8
+	jsr	PutStrCRLF
+
+	jmp	sys.exit		; Exit the program
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Report unorderable types
+;
+; Input:
+;	A:X = address of the string describing the failing operation
+;	Ptr0, Ptr1 = address of the offending variables
+;
+Unorderable
+	pha
+	txa
+	pha
+
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	#M_Unorderable&$FF
+	lda	#M_Unorderable>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	stx	Var
+	lda	Ptr0+1
+	sta	Var+1
+	jsr	VarType
+
+	pla
+	tax
+	pla
+	jsr	sys.stdout.write
+
+	ldx	Ptr1
+	stx	Var
+	lda	Ptr1+1
+	sta	Var+1
+	jsr	VarType
+
+	jmp	sys.exit		; Exit the program
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Check that a variable is defined and return its object
+;
+; Input:
+;	A:X = address of variable
+;
+; Output:
+;	A:X = address of object
+;
+; Uses:
+;	Y is preserved!
+;	Byt0 = Y saved here
+;	Var = address of the variable
+;
+GetObject
+	stx	Var
+	sta	Var+1
+	sty	Byt0
+
+	ldy	#0			; Object address is 0 if not defined
+	lda	(Var),Y
+	tax
+	iny
+	ora	(Var),Y
+	beq	GetObject0
+
+	lda	(Var),Y
+	ldy	Byt0
+
+	rts
+
+GetObject0
+	jmp	Undef
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Allocate tuple and dictionary to contain positional and keyword arguments.
+;
+; Input:
+;	A = number of positional arguments
+;	X = number of keyword arguments
+;
+; Output:
+;	Pargs = address of tuple of positional arguments
+;	Kargs = address of dictionary of keyword arguments
+;
+; Uses:
+;	Byt0, Byt1, Int0, Ptr0
+;
+AllocPargsAndKargs
+	sta	Byt0			; Get number of positional arguments
+	stx	Byt1			; Save number of keyword arguments
+
+	lda	#0			; Presume none of either
+	sta	Pargs
+	sta	Pargs+1
+	sta	Kargs
+	sta	Kargs+1
+
+	lda	Byt0			; Get number of positional arguments
+	beq	AllocPargsAndKargs1
+
+	asl	A			; Times 2
+	clc				; Add size of header
+	adc	#2
+	sta	Int0
+	lda	#0
+	sta	Int0+1
+	jsr	Alloc
+	lda	Ptr0
+	sta	Pargs
+	lda	Ptr0+1
+	sta	Pargs+1
+
+	ora	Ptr0			; Out of memory check
+	bne	AllocPargsAndKargs0
+
+	jmp	OutOfMemory
+
+AllocPargsAndKargs0
+	ldy	#0
+	lda	#TYPE_TUPLE
+	sta	(Pargs),Y
+	lda	Byt0			; Number of positional arguments
+	iny
+	sta	(Pargs),Y
+
+AllocPargsAndKargs1
+	lda	Byt1			; Get number of keyword arguments
+	beq	AllocPargsAndKargs3
+
+	asl	A			; Times 4
+	asl	A
+	clc				; Add size of header
+	adc	#2
+	sta	Int0
+	lda	#0
+	sta	Int0+1
+	jsr	Alloc
+	lda	Ptr0
+	sta	Kargs
+	lda	Ptr0+1
+	sta	Kargs+1
+
+	ora	Ptr0			; Out of memory check
+	bne	AllocPargsAndKargs2
+
+	jmp	OutOfMemory
+
+AllocPargsAndKargs2
+	ldy	#0
+	lda	#TYPE_DICT
+	sta	(Kargs),Y
+	lda	Byt1			; Get number of keyword arguments
+	iny
+	sta	(Kargs),Y
+
+AllocPargsAndKargs3
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Store a positional argument.
+;
+; Input:
+;	Y = relative position to the object in the tuple
+;	Pargs = address of tuple of positional arguments
+;
+; Output:
+;	Y decremented to index previous argument
+;
+; Uses:
+;
+StoreParg
+	sta	(Pargs),Y
+	txa
+	dey
+	sta	(Pargs),Y
+	dey
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Store a keyword argument.
+;
+; Input:
+;	Y = relative position to the object in the dictionary
+;	Kargs = address of dictionary of keyword arguments
+;
+; Output:
+;	Y decremented to index previous argument
+;
+; Uses:
+;
+StoreKarg
+	sta	(Kargs),Y
+	txa
+	dey
+	sta	(Kargs),Y
+	dey
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Decrement reference to a positional argument.
+;
+; Input:
+;	Y = relative position to the object in the tuple
+;	Pargs = address of tuple of positional arguments
+;
+; Uses:
+;	Ptr0
+;
+DerefParg
+	lda	(Pargs),Y
+	tax
+	iny
+	lda	(Pargs),Y
+
+	jmp	Deref
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Decrement reference to a keyword argument.
+;
+; Input:
+;	Y = relative position to the object in the dictionary
+;	Kargs = address of dictionary of keyword arguments
+;
+; Uses:
+;	Ptr0
+;
+DerefKarg
+	lda	(Kargs),Y
+	tax
+	iny
+	lda	(Kargs),Y
+
+	jmp	Deref
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Free tuple and dictionary containing positional and keyword arguments.
+;
+; Input:
+;	Pargs = address of tuple of positional arguments
+;	Kargs = address of dictionary of keyword arguments
+;
+; Uses:
+;	Ptr0
+;
+FreePargsAndKargs
+	lda	Pargs
+	ora	Pargs+1
+	beq	FreePargsAndKargs0
+
+	lda	Pargs
+	sta	Ptr0
+	lda	Pargs+1
+	sta	Ptr0+1
+	jsr	Free
+
+FreePargsAndKargs0
+	lda	Kargs
+	ora	Kargs+1
+	beq	FreePargsAndKargs1
+
+	lda	Kargs
+	sta	Ptr0
+	lda	Kargs+1
+	sta	Ptr0+1
+	jsr	Free
+
+FreePargsAndKargs1
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Call a function
+;
+; Input:
+;	A:X = address of function
+;
+; Uses:
+;	Var = address of the function
+;
+object.__call__
+	stx	Var
+	sta	Var+1
+
+	ldy	#0			; Get variable type
+	lda	(Var),Y
+
+	cmp	#TYPE_FUNCTION		; Is it a function?
+	bne	object.__call__0	; No
+
+	iny
+	lda	(Var),Y			; Copy call vector
+	tax
+	iny
+	lda	(Var),Y
+	stx	Var
+	sta	Var+1
+
+	jmp	(Var)			; Call it
+
+object.__call__0
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	#M_Quote&$FF
+	lda	#M_Quote>>8
+	jsr	sys.stdout.write
+
+	jsr	VarType
+
+	ldx	#M_NotFunc2&$FF
+	lda	#M_NotFunc2>>8
+	jmp	PutStrCRLF
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; sys.stdout.write - Write a string to stdout
+;
+; Input:
+;	A:X = address of the string (first byte of length word)
+;
+; Uses:
+;	Str
+;
+sys.stdout.write
+	stx	Str
+	sta	Str+1
+
+	ldy	#0			; Get string length
+	lda	(Str),Y
+	tax
+	iny				; Now the upper byte
+	lda	(Str),Y
+	sta	Byt0
+	iny
+
+	txa				; Done if zero length
+	ora	Byt0
+	beq	sys.stdout.write2
+
+sys.stdout.write0
+	lda	(Str),Y			; Get a character
+	jsr	OUTCH			; Output it
+	iny				; Next character
+
+	bne	sys.stdout.write1
+
+	inc	Str+1			; Wrap 'page'
+
+sys.stdout.write1
+	dex				; Any more left?
+	bne	sys.stdout.write0
+
+	lda	Byt0			; Done if upper byte is 0
+	beq	sys.stdout.write2
+
+	dec	Byt0			; Decrement upper byte
+	jmp	sys.stdout.write0
+
+sys.stdout.write2
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; ConvertBool0 - Convert the first object from a bool to an int
+;
+; Input:
+;	Ptr0 = address of the object
+;
+; Output:
+;	C clear if int or converted bool in Scr0 pointed to by Ptr0
+;	C and Z set if string
+;	C set and Z clear if other type
+;
+; Uses:
+;	Scr0
+;
+ConvertBool0
+	ldy	#0			; Get type of first operand
+	lda	(Ptr0),Y
+
+	cmp	#TYPE_STRING
+	beq	ConvertBool0a
+
+	ldx	#1
+	cmp	#$C0			; True?
+	beq	ConvertBool0b
+
+	dex
+	cmp	#$40			; False?
+	beq	ConvertBool0b
+
+	cmp	#TYPE_BIGINT		; Big integer?
+	beq	ConvertBool0c
+
+	and	#$40			; Small integer?
+	bne	ConvertBool0c
+
+	cmp     #1			; Clear Z flag for any other type
+
+ConvertBool0a
+	sec				; None of the above
+	rts
+
+ConvertBool0b
+	ldy	#0			; Create integer from bool
+	lda	#$41
+	sta	(Scr0),Y
+	iny
+	txa
+	sta	(Scr0),Y
+
+ConvertBool0c
+	clc
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; ConvertBool1 - Convert the second object from a bool to an int
+;
+; Input:
+;	Ptr1 = address of the object
+;
+; Output:
+;	C clear if int or converted bool in Scr1 pointed to by Ptr1
+;	C set if other type
+;
+; Uses:
+;	Scr1
+;
+ConvertBool1
+	ldy	#0			; Get type of second operand
+	lda	(Ptr1),Y
+
+	ldx	#1
+	cmp	#$C0			; True?
+	beq	ConvertBool1a
+
+	dex
+	cmp	#$40			; False?
+	beq	ConvertBool1a
+
+	cmp	#TYPE_BIGINT		; Big integer?
+	beq	ConvertBool1b
+
+	and	#$40			; Small integer?
+	bne	ConvertBool1b
+
+	sec				; None of the above
+	rts
+
+ConvertBool1a
+	ldy	#0			; Create integer from bool
+	lda	#$41
+	sta	(Scr1),Y
+	iny
+	txa
+	sta	(Scr1),Y
+
+ConvertBool1b
+	clc
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; FinishConvertBool - Finish convert bools to ints
+;
+; Input:
+;	Ptr0 = address of the first object
+;	Ptr1 = address of the second object
+;	Scr0 = converted first object
+;	Scr1 = converted second object
+;
+; Output:
+;	bool objects set to int type
+;
+; Uses:
+;
+FinishConvertBool
+	ldy	#0			; Get type of first operand
+	lda	(Ptr0),Y
+
+	cmp	#$C0			; True?
+	beq	FinishConvertBool0
+
+	cmp	#$40			; False?
+	bne	FinishConvertBool1
+
+FinishConvertBool0
+	lda	Scr0			; Create integer from bool
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+
+FinishConvertBool1
+	ldy	#0			; Get type of second operand
+	lda	(Ptr1),Y
+
+	cmp	#$C0			; True?
+	beq	FinishConvertBool2
+
+	cmp	#$40			; False?
+	bne	FinishConvertBool3
+
+FinishConvertBool2
+	lda	Scr1			; Create integer from bool
+	sta	Ptr1
+	lda	Scr1+1
+	sta	Ptr1+1
+
+FinishConvertBool3
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.__add__ - Add two integers.
+;
+; Input:
+;	Ptr0 = address of one integer
+;	Ptr1 = address of other integer
+;
+; Output:
+;	PtrA = address of the sum
+;
+; Uses:
+;	Byt0 - sign extension for shorter number
+;	Ptr3 - high byte of extended longer number
+;	Ptr4 - temp address of bytes
+;	Ptr5 - sign extension byte of sum
+;	Int4 - temp number of bytes + 1
+;	Int5 - temp number of bytes
+;	Scr3 - sum buffer
+;	Ptr2 - scratch
+;
+int.__add__
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	Ptr2			; Save address of bytes
+	sta	Ptr4
+	lda	Ptr2+1
+	sta	Ptr4+1
+
+	lda	Int2			; Save number of bytes + 1
+	sta	Int4
+	lda	Int2+1
+	sta	Int4+1
+
+	lda	Int3			; Save number of bytes
+	sta	Int5
+	lda	Int3+1
+	sta	Int5+1
+
+	lda	Ptr1			; Do the same for the other int
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	sec				; Determine which is bigger
+	lda	Int3
+	sbc	Int5
+	lda	Int3+1
+	sbc	Int5+1
+	bcs	int.__add__0		; Branch if the first is shorter
+
+	lda	Ptr2			; Swap address of bytes
+	ldx	Ptr4
+	sta	Ptr4
+	stx	Ptr2
+	lda	Ptr2+1
+	ldx	Ptr4+1
+	sta	Ptr4+1
+	stx	Ptr2+1
+
+	lda	Int2			; Swap number of bytes + 1
+	ldx	Int4
+	sta	Int4
+	stx	Int2
+	lda	Int2+1
+	ldx	Int4+1
+	sta	Int4+1
+	stx	Int2+1
+
+	lda	Int3			; Swap number of bytes
+	ldx	Int5
+	sta	Int5
+	stx	Int3
+	lda	Int3+1
+	ldx	Int5+1
+	sta	Int5+1
+	stx	Int3+1
+
+int.__add__0
+	lda	#Scr3&$FF		; Verify scratch space length
+	sta	Ptr3			; This is length of larger int + 1
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Ptr2			; Copy integer to work buffer
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr3
+	sta	Ptr1
+	lda	Scr3+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	eor	#$FF			; 0 or sign extend - flip sign bit
+	rol	A			; Set carry if >= 0
+	lda	#0			; Fill A with dups of carry
+	sbc	#0
+	tax
+
+	clc				; Sign extend the longer number
+	lda	Scr3
+	adc	Int3
+	sta	Ptr3
+	lda	Scr3+1
+	adc	Int3+1
+	sta	Ptr3+1
+	ldy	#0
+	txa
+	sta	(Ptr3),Y
+
+	clc				; Get high byte of the other number
+	lda	Ptr4
+	adc	Int5
+	sta	Ptr0
+	lda	Ptr4+1
+	adc	Int5+1
+	sta	Ptr0+1
+	sec
+	lda	Ptr0
+	sbc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr0+1
+	ldy	#0
+	lda	(Ptr0),Y
+
+	eor	#$FF			; 0 or sign extend - flip sign bit
+	rol	A			; Set carry if >= 0
+	lda	#0			; Fill A with dups of carry
+	sbc	#0
+	sta	Byt0
+
+	sec				; Determine number of sign extended
+	lda	Int2			;   bytes to add
+	sbc	Int5
+	sta	Int4
+	lda	Int2+1
+	sbc	Int5+1
+	sta	Int4+1
+
+	clc
+	lda	Scr3
+	sta	Ptr0			; Address of sum
+	adc	Int5
+	sta	Ptr5			; Address to begin sign extending
+	lda	Scr3+1
+	sta	Ptr0+1
+	adc	Int5+1
+	sta	Ptr5+1
+
+	clc				; Start with no carry
+
+int.__add__1
+	ldy	#0			; Start of first page
+
+	ldx	Int5+1			; At least one full page remaining?
+	beq	int.__add__2		; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int5+1			; One fewer whole page remaining
+
+	jmp	int.__add__3
+
+int.__add__2
+	ldx	Int5			; Any remaining on a partial page?
+	beq	int.__add__4		; No
+
+	sty	Int5			; This will finish the partial page
+
+int.__add__3
+	lda	(Ptr0),Y
+	adc	(Ptr4),Y
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	int.__add__3		; Yes
+
+	inc	Ptr0+1			; Address next page
+	inc	Ptr4+1
+
+	jmp	int.__add__1		; Check for another page
+
+int.__add__4
+	ldy	#0			; Start of first page
+
+	ldx	Int4+1			; At least one full page remaining?
+	beq	int.__add__5		; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int4+1			; One fewer whole page remaining
+
+	jmp	int.__add__6
+
+int.__add__5
+	ldx	Int4			; Any remaining on a partial page?
+	beq	int.__add__7		; No
+
+	sty	Int4			; This will finish the partial page
+
+int.__add__6
+	lda	(Ptr5),Y
+	adc	Byt0
+	sta	(Ptr5),Y
+	iny
+	dex				; More to do on this page?
+	bne	int.__add__6		; Yes
+
+	inc	Ptr5+1			; Address next page
+
+	jmp	int.__add__4		; Check for another page
+
+int.__add__7
+
+;	jmp	int.Condense
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.condense - Minimize the memory required by an integer.
+;
+; Input:
+;	Ptr3 = address of the high byte of the uncondensed integer
+;	Int2 = length of the uncondensed integer
+;
+; Output:
+;	Int2 = length of the condensed integer
+;
+; Uses:
+;	Byt0 = upper sign byte
+;	Byt1 = upper bit of next lower byte
+;
+int.condense
+	ldy	#0			; Get upper byte
+	lda	(Ptr3),Y
+	bne	int.condenseTryNegative
+
+	sta	Byt0			; Look for 0 in the upper byte
+	sta	Byt1			; And 0 in the upper bit of next byte
+
+int.condenseLoop
+	lda     (Ptr3),Y		; Upper byte purely sign extension?
+	cmp	Byt0
+	bne	int.condenseDone	; Done if no
+
+	sec				; Get next lower byte
+	lda	Ptr3
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+
+	lda	(Ptr3),Y		; Upper bit matching?
+	and	#$80
+	cmp	Byt1
+	bne	int.condenseDone	; Done if no
+
+	lda	Int2+1			; Quit if only one byte left
+	bne	int.condenseContinue
+	lda	Int2
+	cmp	#1
+	beq	int.condenseDone
+
+int.condenseContinue
+	sec				; Decrement byte count
+	sbc	#1
+	sta	Int2
+	lda	Int2+1
+	sbc	#0
+	sta	Int2+1
+
+	jmp	int.condenseLoop
+
+int.condenseTryNegative
+	cmp	#$FF			; Done if not sign extension
+	bne	int.condenseDone
+
+	sta	Byt0			; Look for FF in the upper byte
+
+	lda	#$80			; And 1 in the upper bit of next byte
+	sta	Byt1
+
+	jmp	int.condenseLoop
+
+int.condenseDone
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.finish - Finish creating an integer.
+;
+; Input:
+;	Scr3 = scratch area containing the integer
+;	Int2 = length of the integer
+;
+; Output:
+;	PtrA = address of the integer object
+;	A:X = address of the integer object
+;
+; Uses:
+;
+int.finish
+	lda	Int2+1			; Is it a small integer?
+	bne	int.finish1
+
+	lda	Int2
+	cmp	#$40
+	bcs	int.finish1
+
+	clc				; Allocate the object
+	lda	Int2
+	adc	#1
+	sta	Int0
+	lda	Int2+1
+	adc	#0
+	sta	Int0+1
+	jsr	Alloc
+
+	lda	Ptr0			; Out of memory check
+	ora	Ptr0+1
+	bne	int.finish0
+
+	jmp	OutOfMemory
+
+int.finish0
+	clc
+	lda	Ptr0
+	sta	PtrA
+	adc	#1
+	sta	Ptr1
+	lda	Ptr0+1
+	sta	PtrA+1
+	adc	#0
+	sta	Ptr1+1
+	lda	Scr3
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	Int2
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	ldy	#0
+	lda	Int2
+	ora	#$40
+	sta	(PtrA),Y
+
+	ldx	PtrA
+	lda	PtrA+1
+
+	rts
+
+int.finish1
+	clc				; Allocate the object
+	lda	Int2
+	adc	#3
+	sta	Int0
+	lda	Int2+1
+	adc	#0
+	sta	Int0+1
+	jsr	Alloc
+
+	lda	Ptr0			; Out of memory check
+	ora	Ptr0+1
+	bne	int.finish2
+
+	jmp	OutOfMemory
+
+int.finish2
+	clc
+	lda	Ptr0
+	sta	PtrA
+	adc	#3
+	sta	Ptr1
+	lda	Ptr0+1
+	sta	PtrA+1
+	adc	#0
+	sta	Ptr1+1
+	lda	Scr3
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	Int2
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	ldy	#0
+	lda	#TYPE_BIGINT
+	sta	(PtrA),Y
+	iny
+	lda	Int2
+	sta	(PtrA),Y
+	iny
+	lda	Int2+1
+	sta	(PtrA),Y
+
+	ldx	PtrA
+	lda	PtrA+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; str.__add__ - Concatenate two strings.
+;
+; Input:
+;	Ptr0 = address of one string
+;	Ptr1 = address of other string
+;
+; Output:
+;	PtrA = address of the result
+;	A:X = address of the result
+;
+; Uses:
+;	Int0, Ptr2, Ptr3, Ptr4
+;
+str.__add__
+	lda	Ptr0			; Save addresses
+	sta	Ptr4
+	lda	Ptr0+1
+	sta	Ptr4+1
+	lda	Ptr1
+	sta	Ptr2
+	lda	Ptr1+1
+	sta	Ptr2+1
+
+	ldy	#1			; Get combined length
+	clc
+	lda	(Ptr0),Y
+	adc	(Ptr1),Y
+	sta	Int0
+	iny
+	lda	(Ptr0),Y
+	adc	(Ptr1),Y
+	sta	Int0+1
+	clc				; Add length of header
+	lda	Int0
+	adc	#3
+	sta	Int0
+	lda	Int0+1
+	adc	#0
+	sta	Int0+1
+
+	jsr	Alloc
+	lda	Ptr0			; Save address
+	sta	PtrA
+	lda	Ptr0+1
+	sta	PtrA+1
+
+	ora	Ptr0			; Out of memory check
+	bne	str.__add__0
+
+	jmp	OutOfMemory
+
+str.__add__0
+	jsr	CopyString		; Copy first string
+
+	lda	PtrA			; Concatenate second string
+	sta	Ptr4
+	lda	PtrA+1
+	sta	Ptr4+1
+	jsr	ConcatString
+
+	ldx	PtrA
+	lda	PtrA+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__add__ - Add two objects.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;	A:X = address of the result
+;
+; Uses:
+;
+object.__add__
+	jsr	ConvertBool0
+	bcs	object.__add__1		; String or other
+
+	jsr	ConvertBool1
+	bcs	object.__add__0		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__add__
+
+	jmp	int.Finish
+
+object.__add__0
+	ldx	#M_Plus&$FF		; Report unsupported types
+	lda	#M_Plus>>8
+	jmp	Unsupported
+
+object.__add__1
+	bne	object.__add__2		; Not a string
+
+	lda	(Ptr1),Y		; Get type of second addend
+	cmp	#TYPE_STRING
+	bne	object.__add__2
+
+	jsr	str.__add__		; Concatenate the strings
+
+	rts
+
+object.__add__2
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	#M_CantConvert&$FF
+	lda	#M_CantConvert>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr1
+	stx	Var
+	lda	Ptr1+1
+	sta	Var+1
+	jsr	VarType
+
+	ldx	#M_CantConvert2&$FF
+	lda	#M_CantConvert2>>8
+	jmp	PutStrCRLF
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.__sub__ - Subtract two integers.
+;
+; Input:
+;	Ptr0 = address of one integer
+;	Ptr1 = address of other integer
+;
+; Output:
+;	PtrA = address of the difference
+;
+; Uses:
+;	Byt0 - sign extension for shorter number
+;	Byt1 - 0 if first number is longer
+;	Ptr3 - high byte of extended longer number
+;	Ptr4 - temp address of bytes
+;	Ptr5 - sign extension byte of difference
+;	Int4 - temp number of bytes + 1
+;	Int5 - temp number of bytes
+;	Scr3 - difference buffer
+;	Ptr2 - scratch
+;
+int.__sub__
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	Ptr2			; Save address of bytes
+	sta	Ptr4
+	lda	Ptr2+1
+	sta	Ptr4+1
+
+	lda	Int2			; Save number of bytes + 1
+	sta	Int4
+	lda	Int2+1
+	sta	Int4+1
+
+	lda	Int3			; Save number of bytes
+	sta	Int5
+	lda	Int3+1
+	sta	Int5+1
+
+	lda	Ptr1			; Do the same for the other int
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	#0			; Indicate first number is shorter
+	sta	Byt1
+
+	sec				; Determine which is bigger
+	lda	Int3
+	sbc	Int5
+	lda	Int3+1
+	sbc	Int5+1
+	bcs	int.__sub__0		; Branch if the first is shorter
+
+	inc	Byt1			; Indicate second number is shorter
+
+	lda	Ptr2			; Swap address of bytes
+	ldx	Ptr4
+	sta	Ptr4
+	stx	Ptr2
+	lda	Ptr2+1
+	ldx	Ptr4+1
+	sta	Ptr4+1
+	stx	Ptr2+1
+
+	lda	Int2			; Swap number of bytes + 1
+	ldx	Int4
+	sta	Int4
+	stx	Int2
+	lda	Int2+1
+	ldx	Int4+1
+	sta	Int4+1
+	stx	Int2+1
+
+	lda	Int3			; Swap number of bytes
+	ldx	Int5
+	sta	Int5
+	stx	Int3
+	lda	Int3+1
+	ldx	Int5+1
+	sta	Int5+1
+	stx	Int3+1
+
+int.__sub__0
+	lda	#Scr3&$FF		; Verify scratch space length
+	sta	Ptr3			; This is length of larger int + 1
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Byt1			; Need to swap it?
+	bne	int.__sub__1
+
+	lda	Ptr2			; Swap address of bytes
+	ldx	Ptr4
+	sta	Ptr4
+	stx	Ptr2
+	lda	Ptr2+1
+	ldx	Ptr4+1
+	sta	Ptr4+1
+	stx	Ptr2+1
+
+	lda	Int2			; Swap number of bytes + 1
+	ldx	Int4
+	sta	Int4
+	stx	Int2
+	lda	Int2+1
+	ldx	Int4+1
+	sta	Int4+1
+	stx	Int2+1
+
+	lda	Int3			; Swap number of bytes
+	ldx	Int5
+	sta	Int5
+	stx	Int3
+	lda	Int3+1
+	ldx	Int5+1
+	sta	Int5+1
+	stx	Int3+1
+
+int.__sub__1
+	lda	Ptr2			; Copy first integer to work buffer
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr3
+	sta	Ptr1
+	lda	Scr3+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	eor	#$FF			; 0 or sign extend - flip sign bit
+	rol	A			; Set carry if >= 0
+	lda	#0			; Fill A with dups of carry
+	sbc	#0
+	tax
+
+	clc				; Sign extend the first number
+	lda	Scr3
+	adc	Int3
+	sta	Ptr3
+	lda	Scr3+1
+	adc	Int3+1
+	sta	Ptr3+1
+	ldy	#0
+	txa
+	sta	(Ptr3),Y
+
+	clc				; Get high byte of the other number
+	lda	Ptr4
+	adc	Int5
+	sta	Ptr0
+	lda	Ptr4+1
+	adc	Int5+1
+	sta	Ptr0+1
+	sec
+	lda	Ptr0
+	sbc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr0+1
+	ldy	#0
+	lda	(Ptr0),Y
+
+	eor	#$FF			; 0 or sign extend - flip sign bit
+	rol	A			; Set carry if >= 0
+	lda	#0			; Fill A with dups of carry
+	sbc	#0
+	sta	Byt0
+
+	sec				; Determine number of sign extended
+	lda	Int2			;   bytes to subtract
+	sbc	Int5
+	sta	Int4
+	lda	Int2+1
+	sbc	Int5+1
+	sta	Int4+1
+
+	clc
+	lda	Scr3
+	sta	Ptr0			; Address of difference
+	adc	Int5
+	sta	Ptr5			; Address to begin sign extending
+	lda	Scr3+1
+	sta	Ptr0+1
+	adc	Int5+1
+	sta	Ptr5+1
+
+	sec				; Start with no borrow
+
+int.__sub__2
+	ldy	#0			; Start of first page
+
+	ldx	Int5+1			; At least one full page remaining?
+	beq	int.__sub__3		; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int5+1			; One fewer whole page remaining
+
+	jmp	int.__sub__4
+
+int.__sub__3
+	ldx	Int5			; Any remaining on a partial page?
+	beq	int.__sub__5		; No
+
+	sty	Int5			; This will finish the partial page
+
+int.__sub__4
+	lda	(Ptr0),Y
+	sbc	(Ptr4),Y
+	sta	(Ptr0),Y
+	iny
+	dex				; More to do on this page?
+	bne	int.__sub__4		; Yes
+
+	inc	Ptr0+1			; Address next page
+	inc	Ptr4+1
+
+	jmp	int.__sub__2		; Check for another page
+
+int.__sub__5
+	ldy	#0			; Start of first page
+
+	ldx	Int4+1			; At least one full page remaining?
+	beq	int.__sub__6		; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int4+1			; One fewer whole page remaining
+
+	jmp	int.__sub__7
+
+int.__sub__6
+	ldx	Int4			; Any remaining on a partial page?
+	beq	int.__sub__8		; No
+
+	sty	Int4			; This will finish the partial page
+
+int.__sub__7
+	lda	(Ptr5),Y
+	sbc	Byt0
+	sta	(Ptr5),Y
+	iny
+	dex				; More to do on this page?
+	bne	int.__sub__7		; Yes
+
+	inc	Ptr5+1			; Address next page
+
+	jmp	int.__sub__5		; Check for another page
+
+int.__sub__8
+
+	jmp	int.Condense
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__sub__ - Subtract two objects.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__sub__
+	jsr	ConvertBool0
+	bcs	object.__sub__0		; None of the above
+
+	jsr	ConvertBool1
+	bcs	object.__sub__0		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__sub__
+
+	jmp	int.finish
+
+object.__sub__0
+	ldx	#M_Minus&$FF		; Report unsupported types
+	lda	#M_Minus>>8
+	jmp	Unsupported
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IntMul
+;
+; Input:
+;	Ptr2 = address of the multiplier
+;	Int3 = number of bytes in multiplier
+;
+; Output:
+;	Scr3 = address of the result
+;
+IntMul
+;
+;	for each byte in multiplier (L to U)
+X
+	ldy	#0			; Get next byte of multiplier
+	lda	(Ptr2),Y
+	sta	Byt1
+
+	clc				; Increment pointer into multiplier
+	lda	Ptr2
+	adc	#1
+	sta	Ptr2
+	lda	Ptr2+1
+	adc	#0
+	sta	Ptr2+1
+
+;		for each bit in byte (L to U)
+	lda	#$80			; Load 8th bit; when it shifts off,
+	sta	Byt0			;   we need the next byte
+;			if bit is set
+Y
+	lsr	Byt1			; Get next bit
+	bcc	Z			; Don't add multiplicand if bit is 0
+;				add multiplicand to product
+	lda	Scr3
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	Ptr4
+	sta	Ptr1
+	lda	Ptr4+1
+	sta	Ptr1+1
+	lda	Int2
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+	jsr	IntAdd
+
+Z
+;			shift multiplicand left one bit position
+	lda	Ptr4
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	lda	Int2
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+	jsr	IntSHL
+
+	lsr	Byt0			; Any bits left in this byte?
+	bcc	Y
+
+	sec				; Decrement byte count
+	lda	Int3
+	sbc	#1
+	sta	Int3
+	lda	Int3+1
+	sbc	#0
+	sta	Int3+1
+
+	ora	Int3			; Go around again if more
+	bne	X
+;
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.__mul__ - Multiply two integers.
+;
+; Input:
+;	Ptr0 = address of one integer
+;	Ptr1 = address of other integer
+;
+; Output:
+;	PtrA = address of the product
+;
+; Uses:
+;	Byt0 - current byte of the multiplier, then used by condense
+;	Byt1 - counter for bit within byte, then used by condense
+;	Byt2 - low bit indicates whether signs differ
+;	Ptr2 - address of the next byte of the multiplyer
+;	Ptr3 - high byte of extended longer number
+;	Ptr4 - address of the bytes of the multiplicand
+;	Ptr5 - sign extension byte of sum
+;	Int3 - number of bytes in multiplier
+;	Int4 - temp number of bytes + 1
+;	Int5 - number of bytes in product
+;	Scr3 - product buffer
+;
+int.__mul__
+	lda	#0			; Presume signs are the same
+	sta	Byt2
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	Ptr2			; Save address of bytes
+	sta	Ptr4
+	lda	Ptr2+1
+	sta	Ptr4+1
+
+	lda	Int3			; Save number of bytes
+	sta	Int5
+	lda	Int3+1
+	sta	Int5+1
+
+	lda	Ptr1			; Do the same for the other int
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	sec				; Determine which is bigger
+	lda	Int3			; The shorter will be the multiplier
+	sbc	Int5
+	lda	Int3+1
+	sbc	Int5+1
+	bcs	int.__mul__0		; Branch if the first is shorter
+
+	lda	Ptr2			; Swap address of bytes
+	ldx	Ptr4
+	sta	Ptr4
+	stx	Ptr2
+	lda	Ptr2+1
+	ldx	Ptr4+1
+	sta	Ptr4+1
+	stx	Ptr2+1
+
+	lda	Int3			; Swap number of bytes
+	ldx	Int5
+	sta	Int5
+	stx	Int3
+	lda	Int3+1
+	ldx	Int5+1
+	sta	Int5+1
+	stx	Int3+1
+
+int.__mul__0
+	lda	Int3			; Verify scratch space length
+	sta	Int2			;   for multiplier
+	lda	Int3+1
+	sta	Int2+1
+	lda	#Scr1&$FF
+	sta	Ptr3
+	lda	#Scr1>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	clc				; Length of product (and multiplicand)
+	lda	Int3			;   is sum of two lengths
+	adc	Int5
+	sta	Int2
+	lda	Int3+1
+	adc	Int5+1
+	sta	Int2+1
+
+	lda	#Scr0&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr0>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	#Scr3&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Ptr2			; Copy short integer to work buffer
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr1
+	sta	Ptr1
+	lda	Scr1+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	ora	#0			; Check upper byte - is number + or -
+	bpl	int.__mul__1
+
+	lda	Scr1			; Negate the number
+	sta	Ptr0
+	lda	Scr1+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IntNegate
+
+	inc	Byt2			; Remember doing this
+
+int.__mul__1
+	lda	Scr1
+	sta     Ptr2
+	lda	Scr1+1
+	sta	Ptr2+1
+
+	lda	Ptr4			; Copy second integer to work buffer
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	lda	Scr0
+	sta	Ptr1
+	lda	Scr0+1
+	sta	Ptr1+1
+	lda	Int5
+	sta	Int0
+	lda	Int5+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	ora	#0			; Check upper byte - is number + or -
+	bpl	int.__mul__2
+
+	lda	Scr0			; Negate the number
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Int5
+	sta	Int0
+	lda	Int5+1
+	sta	Int0+1
+	jsr	IntNegate
+
+	inc	Byt2			; Remember doing this
+
+int.__mul__2
+	lda	Scr0
+	sta	Ptr4
+	lda	Scr0+1
+	sta	Ptr4+1
+
+	clc
+	lda	Scr0
+	adc	Int5
+	sta	Ptr0			; Address to begin padding
+	lda	Scr0+1
+	adc	Int5+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	lda	#0
+	jsr	SetBlk
+
+	lda	Scr3			; Clear product
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	Int2
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+	lda	#0
+	jsr	SetBlk
+
+	jsr	IntMul
+
+	dec	Byt2			; Odd number of minus signs?
+	bne	int.__mul__6
+
+	lda	Scr3			; Negate the number
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	Int2
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+	jsr	IntNegate
+
+int.__mul__6
+	clc				; Point Ptr3 to the upper byte
+	lda	Scr3
+	adc	Int2
+	sta	Ptr3
+	lda	Scr3+1
+	adc	Int2+1
+	sta	Ptr3+1
+	sec
+	lda	Ptr3
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+
+	jsr	int.condense
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; str.__mul__ - Multiply a string.
+;
+; Input:
+;	Ptr0 = address of one string
+;	Ptr1 = address of the count
+;
+; Output:
+;	PtrA = address of the result
+;	A:X = address of the result
+;
+; Uses:
+;	Int0, Ptr2, Ptr3, Ptr4
+;
+str.__mul__
+	lda	Ptr0			; Save addresses
+	sta	Ptr3
+	lda	Ptr0+1
+	sta	Ptr3+1
+	lda	Ptr1
+	sta	Ptr2
+	lda	Ptr1+1
+	sta	Ptr2+1
+
+	ldy	#1			; Get length of string
+	lda	(Ptr3),Y
+	sta	Int0
+	iny
+	lda	(Ptr3),Y
+	sta	Int0+1
+
+	lda	Scr0
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+
+	lda	Int0			; Transfer string length
+	ldy	#0
+	sta	(Ptr0),Y
+	lda	Int0+1
+	iny
+	sta	(Ptr0),Y
+	and	#$80
+	bne	str.__mul__toobig
+
+	lda	Ptr1			; Get repetition count
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	clc				; Get high byte of size
+	lda	Ptr2
+	adc	Int3
+	sta	Ptr0
+	lda	Ptr2+1
+	adc	Int3+1
+	sta	Ptr0+1
+	sec
+	lda	Ptr0
+	sbc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr0+1
+	ldy	#0
+	lda	(Ptr0),Y
+	and	#$80
+	bne	str.__mul__empty	; Multiply by negative yields empty
+
+	lda	Scr1			; Get pointer to scratch space
+	sta	Ptr0
+	lda	Scr1+1
+	sta	Ptr0+1
+
+	ldy	#0			; Get low byte of repetition count
+	lda	(Ptr2),Y
+	sta	(Ptr0),Y
+	sta	Int4
+	iny
+
+	lda	Int3+1			; Get size of repetition count
+	bne	str.__mul__toobig
+	lda	Int3
+	cmp	#2
+	bcs	str.__mul__toobig	; Branch if size is more than 2 bytes
+	beq	str.__mul__0		; Branch if size is 2 bytes
+
+	ldy	#0			; Size is one byte integer
+	lda	(Ptr2),Y		; Retrieve single low byte
+	cmp	#1
+	bcc	str.__mul__empty	; * 0 yields empty string
+	beq	str.__mul__identity
+
+	lda	#0			; Else go repeat
+	iny
+	jmp	str.__mul__1
+
+str.__mul__identity
+	lda	Ptr3			; Result is original string
+	sta	PtrA
+	lda	Ptr3+1
+	sta	PtrA+1
+
+	jmp	AddRef
+
+;	rts
+
+str.__mul__empty
+	ldx	#S_Empty&$FF
+	lda	#S_Empty>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+str.__mul__toobig
+	jmp	OutOfMemory
+
+str.__mul__0
+	lda	(Ptr2),Y		; Get second byte of the size
+
+str.__mul__1
+	sta	(Ptr0),Y		; Store second byte of the size
+	sta	Int4+1
+
+	lda	Scr3			; Clear product
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	#4
+	sta	Int0
+	lda	#0
+	sta	Int0+1
+	jsr	SetBlk
+
+	lda	Scr0
+	sta	Ptr4
+	lda	Scr0+1
+	sta	Ptr4+1
+
+	lda	#2
+	sta	Int2
+	lda	#0
+	sta	Int2+1
+
+	jsr	IntMul
+
+	lda	Scr3			; Get result size
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+
+	ldy	#3
+	lda	(Ptr0),Y
+	bne	str.__mul__toobig
+	dey
+	lda	(Ptr0),Y
+	bne	str.__mul__toobig
+	dey
+	lda	(Ptr0),Y
+	sta	Int0+1
+	and	#$80
+	bne	str.__mul__toobig
+	dey
+	lda	(Ptr0),Y
+	sta	Int0
+
+	clc				; Add length of header
+	lda	Int0
+	adc	#3
+	sta	Int0
+	lda	Int0+1
+	adc	#0
+	sta	Int0+1
+
+	jsr	Alloc
+	lda	Ptr0			; Save address
+	sta	PtrA
+	lda	Ptr0+1
+	sta	PtrA+1
+
+	ora	Ptr0			; Out of memory check
+	beq	str.__mul__toobig
+
+	sec				; Condition repeat count
+	lda	Int4
+	sbc	#1
+	sta	Int4
+	lda	Int4+1
+	sbc	#0
+	clc
+	adc	#1
+	sta	Int4+1
+
+	lda	Ptr3
+	sta	Ptr4
+	lda	Ptr3+1
+	sta	Ptr4+1
+	jsr	CopyString		; Copy first string
+
+str.__mul__z
+	lda	PtrA			; Concatenate second string
+	sta	Ptr4
+	lda	PtrA+1
+	sta	Ptr4+1
+	lda	Ptr3
+	sta	Ptr2
+	lda	Ptr3+1
+	sta	Ptr2+1
+	jsr	ConcatString
+
+	sec
+	lda	Int4
+	sbc	#1
+	sta	Int4
+	bne	str.__mul__z
+
+	sec
+	lda	Int4+1
+	sbc	#1
+	sta	Int4+1
+	bne	str.__mul__z
+
+	ldx	PtrA
+	lda	PtrA+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__mul__ - Multiply two objects.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;	A:X = address of the result
+;
+; Uses:
+;
+object.__mul__
+	jsr	ConvertBool0
+	bcs	object.__mul__2		; String or other
+
+	jsr	ConvertBool1
+	bcs	object.__mul__0		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__mul__
+
+	jmp	int.Finish
+
+object.__mul__0
+	beq	object.__mul__1		; Int * string
+
+	ldx	#M_Times&$FF		; Report unsupported types
+	lda	#M_Times>>8
+	jmp	Unsupported
+
+object.__mul__1
+	lda	Ptr0			; Swap so that the string is Ptr0
+	ldx	Ptr1
+	sta	Ptr1
+	stx	Ptr0
+	lda	Ptr0+1
+	ldx	Ptr1+1
+	sta	Ptr1+1
+	stx	Ptr0+1
+
+	jsr	ConvertBool0
+
+object.__mul__2
+	bne	object.__mul__3		; Not a string
+
+	jsr	ConvertBool1
+	bcs	object.__mul__3		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	str.__mul__		; Concatenate the strings
+
+	rts
+
+object.__mul__3
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	#M_CantMultiply&$FF
+	lda	#M_CantMultiply>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr1
+	stx	Var
+	lda	Ptr1+1
+	sta	Var+1
+	jsr	VarType
+
+	ldx	#M_Quote&$FF
+	lda	#M_Quote>>8
+	jmp	PutStrCRLF
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.__floordiv__ - Divide two integers yielding an integer quotient.
+;
+; Input:
+;	Ptr0 = address of one integer
+;	Ptr1 = address of other integer
+;
+; Output:
+;	PtrA = address of the quotient
+;
+; Uses:
+;	Byt2 - low bit indicates whether signs differ
+;	Ptr3 - high byte of extended longer number
+;	Ptr4 - temp address of bytes
+;	Ptr5 - sign extension byte of sum
+;	Int4 - temp number of bytes + 1
+;	Int5 - temp number of bytes
+;	Scr3 - sum buffer
+;	Ptr2 - scratch
+;
+int.__floordiv__
+	lda	#0			; Presume signs are the same
+	sta	Byt2
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	Ptr2			; Save address of bytes
+	sta	Ptr4
+	lda	Ptr2+1
+	sta	Ptr4+1
+
+	lda	Int3			; Save number of bytes
+	sta	Int5
+	lda	Int3+1
+	sta	Int5+1
+
+	lda	Ptr1			; Do the same for the other int
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	Int3			; Check for divide by 0
+	cmp	#1
+	bne	int.__floordiv__0
+	ldy	#0
+	lda	(Ptr2),Y
+	ora	Int3+1
+	bne	int.__floordiv__0
+
+	jmp	DivideByZero
+
+int.__floordiv__0
+	lda	Int3			; Presume the second is larger
+	sta	Int2
+	lda	Int3+1
+	sta	Int2+1
+
+	sec				; Determine which is bigger
+	lda	Int3
+	sbc	Int5
+	lda	Int3+1
+	sbc	Int5+1
+	bcs	int.__floordiv__1	; Branch if the first is shorter
+
+	lda	Int5			; Use longer first length
+	sta	Int2
+	lda	Int5+1
+	sta	Int2+1
+
+int.__floordiv__1
+	lda	Int2			; Use longer first length
+	sta	Int1
+	lda	Int2+1
+	sta	Int1+1
+
+	lda	#Scr0&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr0>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	#Scr1&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr1>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	#Scr2&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr2>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	#Scr3&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Ptr4			; Copy first integer to work buffer
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	lda	Scr0
+	sta	Ptr1
+	lda	Scr0+1
+	sta	Ptr1+1
+	lda	Int5
+	sta	Int0
+	lda	Int5+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	ora	#0			; Check upper byte - is number + or -
+	bpl	int.__floordiv__2
+
+	lda	Scr0			; Negate the number
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Int5
+	sta	Int0
+	lda	Int5+1
+	sta	Int0+1
+	jsr	IntNegate
+
+	lda	Byt2			; Remember doing this
+	clc
+	adc	#$81
+	sta	Byt2
+
+int.__floordiv__2
+	sec				; Determine number of padding bytes
+	lda	Int2
+	sbc	Int5
+	sta	Int0
+	lda	Int2+1
+	sbc	Int5+1
+	sta	Int0+1
+	ora	Int0
+	beq	int.__floordiv__3	; Branch if no padding needed
+
+	clc
+	lda	Scr0
+	adc	Int5
+	sta	Ptr0			; Address to begin padding
+	lda	Scr0+1
+	adc	Int5+1
+	sta	Ptr0+1
+	sec
+	lda	Ptr0
+	sbc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr0+1
+
+	lda	#0
+	jsr	SetBlk
+
+int.__floordiv__3
+	lda	Ptr2			; Copy second integer to work buffer
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr1
+	sta	Ptr1
+	lda	Scr1+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	lda	Ptr2			; Copy divisor for mod rounding
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr3
+	sta	Ptr1
+	lda	Scr3+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	ora	#0			; Check upper byte - is number + or -
+	bpl	int.__floordiv__4
+
+	lda	Scr1			; Negate the number
+	sta	Ptr0
+	lda	Scr1+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IntNegate
+
+	lda	Byt2			; Remember doing this
+	clc
+	adc	#$41
+	sta	Byt2
+
+int.__floordiv__4
+	sec				; Determine number of padding bytes
+	lda	Int2
+	sbc	Int3
+	sta	Int0
+	lda	Int2+1
+	sbc	Int3+1
+	sta	Int0+1
+	ora	Int0
+	beq	int.__floordiv__5	; Branch if no padding needed
+
+	clc
+	lda	Scr1
+	adc	Int3
+	sta	Ptr0			; Address to begin padding
+	lda	Scr1+1
+	adc	Int3+1
+	sta	Ptr0+1
+
+	lda	#0
+	jsr	SetBlk
+
+	clc
+	lda	Scr3
+	adc	Int3
+	sta	Ptr0			; Address to begin padding
+	lda	Scr3+1
+	adc	Int3+1
+	sta	Ptr0+1
+
+	lda	#0
+	jsr	SetBlk
+
+int.__floordiv__5
+	lda	Int2
+	sta	Int0
+	sta	Int3			; Save a copy in Int3
+	lda	Int2+1
+	sta	Int0+1
+	sta	Int3+1
+
+	jsr	IDivMod
+
+	lda	#1			; Odd number of minus signs?
+	bit	Byt2
+	beq	int.__floordiv__6
+
+	lda	Scr2			; Negate the number
+	sta	Ptr0
+	lda	Scr2+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IntNegate
+
+int.__floordiv__6
+	lda	Int1			; Check for remainder
+	sta	Int0
+	lda	Int1+1
+	sta	Int0+1
+	lda	Scr0
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+
+int.__floordiv__7
+	ldy	#0
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	int.__floordiv__8	; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	int.__floordiv__9
+
+int.__floordiv__8
+	ldx	Int0			; Any remaining on a partial page?
+	beq	int.__floordiv__11	; No
+
+	sty	Int0			; This will finish the partial page
+
+int.__floordiv__9
+	lda	(Ptr0),Y
+	bne	int.__floordiv__10	; Non-zero; got remainder
+	iny
+	dex				; More to do on this page?
+	bne	int.__floordiv__9	; Yes
+
+	inc	Ptr0+1			; Address next page
+
+	jmp	int.__floordiv__7	; Check for another page
+
+int.__floordiv__10
+	lda	Byt2			; Indicate we have a remainder
+	ora	#$20
+	sta	Byt2
+
+int.__floordiv__11
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.FinishFloordiv - Finish dividing two integers yielding an integer
+;	quotient.
+;
+; Input:
+;	Byt2 - low bit indicates whether signs differ
+;		bit $80 is the sign off the dividend
+;		bit $40 is the sign of the divisor
+;		bit $20 is set if there is a remaindar
+;	Scr2 = contains the quotient
+;	Int3 = length of the quotient
+;
+; Output:
+;	PtrA = address of the quotient
+;
+int.FinishFloordiv
+	lda	#$20			; Do we have a remainder?
+	bit	Byt2
+	beq	int.FinishFloordiv0	; No
+
+	lda	Byt2			; Are dividend and divisor signs same?
+	and	#$C0			; Isolate signs
+
+	beq	int.FinishFloordiv0	; Both positive
+	cmp	#$C0			; Both negative?
+	beq	int.FinishFloordiv0
+
+	; Subtract one from quotient to round toward negative infinity
+
+	lda	Scr0			; Make a one
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	lda	#0
+	jsr	SetBlk
+
+	lda	#1
+	ldy	#0
+	sta	(Scr0),Y
+
+	lda	Scr2			; Subtract it from the quotient
+	sta	Ptr0
+	lda	Scr2+1
+	sta	Ptr0+1
+	lda	Scr0
+	sta	Ptr1
+	lda	Scr0+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IntSub
+
+int.FinishFloordiv0
+	ldx	Scr2			; Temporarily switch scratch buffers
+	lda	Scr3
+	stx	Scr3
+	sta	Scr2
+	ldx	Scr2+1
+	lda	Scr3+1
+	stx	Scr3+1
+	sta	Scr2+1
+
+	lda	Int3
+	sta	Int2
+	lda	Int3+1
+	sta	Int2+1
+
+	clc				; Point Ptr3 to the upper byte
+	lda	Scr3
+	adc	Int2
+	sta	Ptr3
+	lda	Scr3+1
+	adc	Int2+1
+	sta	Ptr3+1
+	sec
+	lda	Ptr3
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+
+	jsr	int.condense
+	jsr	int.finish
+
+	ldx	Scr2			; Put scratch buffers back
+	lda	Scr3
+	stx	Scr3
+	sta	Scr2
+	ldx	Scr2+1
+	lda	Scr3+1
+	stx	Scr3+1
+	sta	Scr2+1
+
+	ldx	PtrA
+	lda	PtrA+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.FinishMod - Finish dividing two integers yielding an integer
+;	remainder.
+;
+; Input:
+;	Byt2 - low bit indicates whether signs differ
+;		bit $80 is the sign off the dividend
+;		bit $40 is the sign of the divisor
+;		bit $20 is set if there is a remaindar
+;	Scr0 = contains the remainder
+;	Int3 = length of the remainder
+;	Scr3 = contains the divisor
+;
+; Output:
+;	PtrA = address of the remainder
+;
+int.FinishMod
+	lda	#$20			; Do we have a remainder?
+	bit	Byt2
+	beq	int.FinishModA		; No
+
+	lda	#$80			; Was the dividend negative?
+	bit	Byt2
+	beq	int.FinishMod0
+
+	lda	Scr0			; Negate the remainder
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IntNegate
+
+int.FinishMod0
+	lda	Byt2			; Are dividend and divisor signs same?
+	and	#$C0			; Isolate signs
+
+	beq	int.FinishModA		; Both positive
+	cmp	#$C0			; Both negative?
+	beq	int.FinishModA
+
+	; Add divisor to remainder to adjust for rounding toward negative
+	;   infinity
+
+	lda	Scr0			; Add it to the remainder
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Scr3
+	sta	Ptr1
+	lda	Scr3+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IntAdd
+
+int.FinishModA
+	ldx	Scr0			; Temporarily switch scratch buffers
+	lda	Scr3
+	stx	Scr3
+	sta	Scr0
+	ldx	Scr0+1
+	lda	Scr3+1
+	stx	Scr3+1
+	sta	Scr0+1
+
+	lda	Int3
+	sta	Int2
+	lda	Int3+1
+	sta	Int2+1
+
+	clc				; Point Ptr3 to the upper byte
+	lda	Scr3
+	adc	Int2
+	sta	Ptr3
+	lda	Scr3+1
+	adc	Int2+1
+	sta	Ptr3+1
+	sec
+	lda	Ptr3
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+
+	jsr	int.condense
+	jsr	int.finish
+
+	ldx	Scr0			; Put scratch buffers back
+	lda	Scr3
+	stx	Scr3
+	sta	Scr0
+	ldx	Scr0+1
+	lda	Scr3+1
+	stx	Scr3+1
+	sta	Scr0+1
+
+	ldx	PtrA
+	lda	PtrA+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__floordiv__ - Divide two objects yielding integral result.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__floordiv__
+	jsr	ConvertBool0
+	bcs	object.__floordiv__0	; None of the above
+
+	jsr	ConvertBool1
+	bcs	object.__floordiv__0	; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__floordiv__
+
+	jmp	int.FinishFloordiv
+
+object.__floordiv__0
+	ldx	#M_Floordiv&$FF		; Report unsupported types
+	lda	#M_Floordiv>>8
+	jmp	Unsupported
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__mod__ - Divide two objects yielding integral remainder.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__mod__
+	jsr	ConvertBool0
+	bcs	object.__mod__0		; None of the above
+
+	jsr	ConvertBool1
+	bcs	object.__mod__0		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__floordiv__
+
+	jmp	int.FinishMod
+
+object.__mod__0
+	ldx	#M_Mod&$FF		; Report unsupported types
+	lda	#M_Mod>>8
+	jmp	Unsupported
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.__and__ - And two integers.
+;
+; Input:
+;	Ptr0 = address of one integer
+;	Ptr1 = address of other integer
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+;	Byt0 - sign extension for shorter number
+;	Byt1 - 0 if first number is longer
+;	Ptr3 - high byte of extended longer number
+;	Ptr4 - temp address of bytes
+;	Ptr5 - sign extension byte of difference
+;	Int4 - temp number of bytes + 1
+;	Int5 - temp number of bytes
+;	Scr3 - difference buffer
+;	Ptr2 - scratch
+;
+int.__and__
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	Ptr2			; Save address of bytes
+	sta	Ptr4
+	lda	Ptr2+1
+	sta	Ptr4+1
+
+	lda	Int3			; Save number of bytes
+	sta	Int4
+	sta	Int5
+	lda	Int3+1
+	sta	Int4+1
+	sta	Int5+1
+
+	lda	Ptr1			; Do the same for the other int
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	; length of result := length of first number
+	; if second number is longer and first number is negative or
+	;   second number is shorter and second number is positive
+	;	length of result := length of second number
+
+	lda	Int4+1
+	cmp	Int3+1
+	bne	int.__and__1
+
+	lda	Int4
+	cmp	Int3
+
+	bcs	int.__and__2
+	beq	int.__and__4		; Same length
+
+int.__and__0
+	; The second number is longer
+
+	clc
+	lda	Ptr4
+	adc	Int4
+	sta	Ptr0
+	lda	Ptr4+1
+	adc	Int4+1
+	sta	Ptr0+1
+
+	sec
+	lda	Ptr0
+	sbc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr0+1
+
+	ldy	#0
+	lda	(Ptr0),Y
+	bmi	int.__and__3		; Use length of the second number
+
+	jmp	int.__and__4
+
+int.__and__1
+	; Upper bytes are the same
+	bcc	int.__and__0
+
+int.__and__2
+	; The second number is shorter
+
+	clc
+	lda	Ptr2
+	adc	Int3
+	sta	Ptr0
+	lda	Ptr2+1
+	adc	Int3+1
+	sta	Ptr0+1
+
+	sec
+	lda	Ptr0
+	sbc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr0+1
+
+	ldy	#0
+	lda	(Ptr0),Y
+	bmi	int.__and__4		; Keep length of the first number
+
+int.__and__3
+	lda	Int3			; Result is the length of the second
+	sta	Int5
+	lda	Int3+1
+	sta	Int5+1
+
+int.__and__4
+	lda	Int5
+	sta	Int2
+	lda	Int5+1
+	sta	Int2+1
+
+	lda	#Scr3&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int5			; Presume result is shorter
+	sta	Int0
+	lda	Int5+1
+	sta	Int0+1
+
+	lda	Int5+1
+	cmp	Int4+1
+
+	beq	int.__and__5		; Upper bytes of length are same
+	bcc	int.__and__7		; Result is shorter than first
+
+	jmp	int.__and__6		; First is shorter
+
+int.__and__5
+	lda	Int4
+	cmp	Int5
+
+	bcs	int.__and__7		; Result is shorter
+
+int.__and__6
+	clc				; Sign extend first number
+	lda	Scr3
+	adc	Int4
+	sta	Ptr0
+	lda	Scr3+1
+	adc	Int4+1
+	sta	Ptr0+1
+
+	sec
+	lda	Int5
+	sbc	Int4
+	sta	Int0
+	lda	Int5+1
+	sbc	Int4+1
+	sta	Int0+1
+
+	clc
+	lda	Ptr4
+	adc	Int4
+	sta	Ptr1
+	lda	Ptr4+1
+	adc	Int4+1
+	sta	Ptr1+1
+	sec
+	lda	Ptr1
+	sbc	#1
+	sta	Ptr1
+	lda	Ptr1+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#0
+	lda	(Ptr1),Y		; Upper byte of first number
+	eor	#$FF			; Clone sign into all bits
+	rol	A
+	lda	#0
+	sbc	#0
+
+	jsr	SetBlk
+
+	lda	Int4			; Set to copy entire first number
+	sta	Int0
+	lda	Int4+1
+	sta	Int0+1
+
+int.__and__7
+	lda	Ptr4			; Copy first number to scratch
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	lda	Scr3
+	sta	Ptr1
+	lda	Scr3+1
+	sta	Ptr1+1
+	jsr	MovBlk
+
+	lda	Int5
+	sta	Int2
+	lda	Int5+1
+	sta	Int2+1
+
+	lda	#Scr2&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr2>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int3			; Presume result is shorter
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+
+	lda	Int3+1
+	cmp	Int5+1
+
+	beq	int.__and__8		; Upper bytes of length are same
+	bcc	int.__and__A		; Result is shorter than second
+
+	jmp	int.__and__9		; Second is shorter
+
+int.__and__8
+	lda	Int5
+	cmp	Int3
+
+	bcs	int.__and__A		; Result is shorter
+
+int.__and__9
+	clc				; Sign extend second number
+	lda	Scr2
+	adc	Int3
+	sta	Ptr0
+	lda	Scr2+1
+	adc	Int3+1
+	sta	Ptr0+1
+
+	sec
+	lda	Int3
+	sbc	Int5
+	sta	Int0
+	lda	Int3+1
+	sbc	Int5+1
+	sta	Int0+1
+
+	clc
+	lda	Ptr2
+	adc	Int3
+	sta	Ptr1
+	lda	Ptr2+1
+	adc	Int3+1
+	sta	Ptr1+1
+	sec
+	lda	Ptr1
+	sbc	#1
+	sta	Ptr1
+	lda	Ptr1+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#0
+	lda	(Ptr1),Y		; Upper byte of second number
+	eor	#$FF			; Clone sign into all bits
+	rol	A
+	lda	#0
+	sbc	#0
+
+	jsr	SetBlk
+
+	lda	Int2			; Set to copy entire second number
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+
+int.__and__A
+	lda	Ptr2			; Copy second number to scratch
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr2
+	sta	Ptr1
+	lda	Scr2+1
+	sta	Ptr1+1
+	jsr	MovBlk
+
+	lda	Scr3
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	Scr2
+	sta	Ptr1
+	lda	Scr2+1
+	sta	Ptr1+1
+	lda	Int5
+	sta	Int0
+	sta	Int2
+	lda	Int5+1
+	sta	Int0+1
+	sta	Int2+1
+	jsr	IntAnd			; Do the and
+
+	clc				; Point Ptr3 to the upper byte
+	lda	Scr3
+	adc	Int2
+	sta	Ptr3
+	lda	Scr3+1
+	adc	Int2+1
+	sta	Ptr3+1
+	sec
+	lda	Ptr3
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+	jmp	int.Condense
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__and__ - And two objects.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__and__
+	jsr	ConvertBool0
+	bcs	object.__and__0		; None of the above
+
+	jsr	ConvertBool1
+	bcs	object.__and__0		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__and__
+
+	jmp	int.finish
+
+object.__and__0
+	ldx	#M_And&$FF		; Report unsupported types
+	lda	#M_And>>8
+	jmp	Unsupported
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.__xor__ - Xor two integers.
+;
+; Input:
+;	Ptr0 = address of one integer
+;	Ptr1 = address of other integer
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+;	Byt0 - sign extension for shorter number
+;	Byt1 - 0 if first number is longer
+;	Ptr3 - high byte of extended longer number
+;	Ptr4 - temp address of bytes
+;	Ptr5 - sign extension byte of difference
+;	Int4 - temp number of bytes + 1
+;	Int5 - temp number of bytes
+;	Scr3 - difference buffer
+;	Ptr2 - scratch
+;
+int.__xor__
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	Ptr2			; Save address of bytes
+	sta	Ptr4
+	lda	Ptr2+1
+	sta	Ptr4+1
+
+	lda	Int3			; Save number of bytes
+	sta	Int4
+	sta	Int5
+	lda	Int3+1
+	sta	Int4+1
+	sta	Int5+1
+
+	lda	Ptr1			; Do the same for the other int
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	; length of result := length of first number
+	; if second number is longer
+	;	length of result := length of second number
+
+	lda	Int3+1
+	cmp	Int4+1
+	bcc	int.__xor__1
+	bne	int.__xor__0
+
+	lda	Int3
+	cmp	Int4
+
+	bcc	int.__xor__1
+
+int.__xor__0
+	; The second number is shorter or same
+	lda	Int3			; Result is the length of the second
+	sta	Int5
+	lda	Int3+1
+	sta	Int5+1
+
+int.__xor__1
+	lda	Int5
+	sta	Int2
+	lda	Int5+1
+	sta	Int2+1
+
+	lda	#Scr3&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int5			; Presume result is shorter
+	sta	Int0
+	lda	Int5+1
+	sta	Int0+1
+
+	lda	Int5+1
+	cmp	Int4+1
+
+	beq	int.__xor__2		; Upper bytes of length are same
+	bcc	int.__xor__4		; Result is shorter than first
+
+	jmp	int.__xor__3		; First is shorter
+
+int.__xor__2
+	lda	Int4
+	cmp	Int5
+
+	bcs	int.__xor__4		; Result is shorter
+
+int.__xor__3
+	clc				; Sign extend first number
+	lda	Scr3
+	adc	Int4
+	sta	Ptr0
+	lda	Scr3+1
+	adc	Int4+1
+	sta	Ptr0+1
+
+	sec
+	lda	Int5
+	sbc	Int4
+	sta	Int0
+	lda	Int5+1
+	sbc	Int4+1
+	sta	Int0+1
+
+	clc
+	lda	Ptr4
+	adc	Int4
+	sta	Ptr1
+	lda	Ptr4+1
+	adc	Int4+1
+	sta	Ptr1+1
+	sec
+	lda	Ptr1
+	sbc	#1
+	sta	Ptr1
+	lda	Ptr1+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#0
+	lda	(Ptr1),Y		; Upper byte of first number
+	eor	#$FF			; Clone sign into all bits
+	rol	A
+	lda	#0
+	sbc	#0
+
+	jsr	SetBlk
+
+	lda	Int4			; Set to copy entire first number
+	sta	Int0
+	lda	Int4+1
+	sta	Int0+1
+
+int.__xor__4
+	lda	Ptr4			; Copy first number to scratch
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	lda	Scr3
+	sta	Ptr1
+	lda	Scr3+1
+	sta	Ptr1+1
+	jsr	MovBlk
+
+	lda	Int5
+	sta	Int2
+	lda	Int5+1
+	sta	Int2+1
+
+	lda	#Scr2&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr2>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int3			; Presume result is shorter
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+
+	lda	Int3+1
+	cmp	Int5+1
+
+	beq	int.__xor__5		; Upper bytes of length are same
+	bcc	int.__xor__7		; Result is shorter than second
+
+	jmp	int.__xor__6		; Second is shorter
+
+int.__xor__5
+	lda	Int5
+	cmp	Int3
+
+	bcs	int.__xor__7		; Result is shorter
+
+int.__xor__6
+	clc				; Sign extend second number
+	lda	Scr2
+	adc	Int3
+	sta	Ptr0
+	lda	Scr2+1
+	adc	Int3+1
+	sta	Ptr0+1
+
+	sec
+	lda	Int3
+	sbc	Int5
+	sta	Int0
+	lda	Int3+1
+	sbc	Int5+1
+	sta	Int0+1
+
+	clc
+	lda	Ptr2
+	adc	Int3
+	sta	Ptr1
+	lda	Ptr2+1
+	adc	Int3+1
+	sta	Ptr1+1
+	sec
+	lda	Ptr1
+	sbc	#1
+	sta	Ptr1
+	lda	Ptr1+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#0
+	lda	(Ptr1),Y		; Upper byte of second number
+	eor	#$FF			; Clone sign into all bits
+	rol	A
+	lda	#0
+	sbc	#0
+
+	jsr	SetBlk
+
+	lda	Int2			; Set to copy entire second number
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+
+int.__xor__7
+	lda	Ptr2			; Copy second number to scratch
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr2
+	sta	Ptr1
+	lda	Scr2+1
+	sta	Ptr1+1
+	jsr	MovBlk
+
+	lda	Scr3
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	Scr2
+	sta	Ptr1
+	lda	Scr2+1
+	sta	Ptr1+1
+	lda	Int5
+	sta	Int0
+	sta	Int2
+	lda	Int5+1
+	sta	Int0+1
+	sta	Int2+1
+	jsr	IntXor			; Do the xor
+
+	clc				; Point Ptr3 to the upper byte
+	lda	Scr3
+	adc	Int2
+	sta	Ptr3
+	lda	Scr3+1
+	adc	Int2+1
+	sta	Ptr3+1
+	sec
+	lda	Ptr3
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+	jmp	int.Condense
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__xor__ - Xor two objects.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__xor__
+	jsr	ConvertBool0
+	bcs	object.__xor__0		; None of the above
+
+	jsr	ConvertBool1
+	bcs	object.__xor__0		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__xor__
+
+	jmp	int.finish
+
+object.__xor__0
+	ldx	#M_Xor&$FF		; Report unsupported types
+	lda	#M_Xor>>8
+	jmp	Unsupported
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.__or__ - Or two integers.
+;
+; Input:
+;	Ptr0 = address of one integer
+;	Ptr1 = address of other integer
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+;	Byt0 - sign extension for shorter number
+;	Byt1 - 0 if first number is longer
+;	Ptr3 - high byte of extended longer number
+;	Ptr4 - temp address of bytes
+;	Ptr5 - sign extension byte of difference
+;	Int4 - temp number of bytes + 1
+;	Int5 - temp number of bytes
+;	Scr3 - difference buffer
+;	Ptr2 - scratch
+;
+int.__or__
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	Ptr2			; Save address of bytes
+	sta	Ptr4
+	lda	Ptr2+1
+	sta	Ptr4+1
+
+	lda	Int3			; Save number of bytes
+	sta	Int4
+	sta	Int5
+	lda	Int3+1
+	sta	Int4+1
+	sta	Int5+1
+
+	lda	Ptr1			; Do the same for the other int
+	sta	Ptr0
+	lda	Ptr1+1
+	sta	Ptr0+1
+
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	; length of result := length of first number
+	; if second number is longer
+	;	length of result := length of second number
+
+	lda	Int3+1
+	cmp	Int4+1
+	bcc	int.__or__1
+	bne	int.__or__0
+
+	lda	Int3
+	cmp	Int4
+
+	bcc	int.__or__1
+
+int.__or__0
+	; The second number is shorter or same
+	lda	Int3			; Result is the length of the second
+	sta	Int5
+	lda	Int3+1
+	sta	Int5+1
+
+int.__or__1
+	lda	Int5
+	sta	Int2
+	lda	Int5+1
+	sta	Int2+1
+
+	lda	#Scr3&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int5			; Presume result is shorter
+	sta	Int0
+	lda	Int5+1
+	sta	Int0+1
+
+	lda	Int5+1
+	cmp	Int4+1
+
+	beq	int.__or__2		; Upper bytes of length are same
+	bcc	int.__or__4		; Result is shorter than first
+
+	jmp	int.__or__3		; First is shorter
+
+int.__or__2
+	lda	Int4
+	cmp	Int5
+
+	bcs	int.__or__4		; Result is shorter
+
+int.__or__3
+	clc				; Sign extend first number
+	lda	Scr3
+	adc	Int4
+	sta	Ptr0
+	lda	Scr3+1
+	adc	Int4+1
+	sta	Ptr0+1
+
+	sec
+	lda	Int5
+	sbc	Int4
+	sta	Int0
+	lda	Int5+1
+	sbc	Int4+1
+	sta	Int0+1
+
+	clc
+	lda	Ptr4
+	adc	Int4
+	sta	Ptr1
+	lda	Ptr4+1
+	adc	Int4+1
+	sta	Ptr1+1
+	sec
+	lda	Ptr1
+	sbc	#1
+	sta	Ptr1
+	lda	Ptr1+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#0
+	lda	(Ptr1),Y		; Upper byte of first number
+	eor	#$FF			; Clone sign into all bits
+	rol	A
+	lda	#0
+	sbc	#0
+
+	jsr	SetBlk
+
+	lda	Int4			; Set to copy entire first number
+	sta	Int0
+	lda	Int4+1
+	sta	Int0+1
+
+int.__or__4
+	lda	Ptr4			; Copy first number to scratch
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	lda	Scr3
+	sta	Ptr1
+	lda	Scr3+1
+	sta	Ptr1+1
+	jsr	MovBlk
+
+	lda	Int5
+	sta	Int2
+	lda	Int5+1
+	sta	Int2+1
+
+	lda	#Scr2&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr2>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int3			; Presume result is shorter
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+
+	lda	Int3+1
+	cmp	Int5+1
+
+	beq	int.__or__5		; Upper bytes of length are same
+	bcc	int.__or__7		; Result is shorter than second
+
+	jmp	int.__or__6		; Second is shorter
+
+int.__or__5
+	lda	Int5
+	cmp	Int3
+
+	bcs	int.__or__7		; Result is shorter
+
+int.__or__6
+	clc				; Sign extend second number
+	lda	Scr2
+	adc	Int3
+	sta	Ptr0
+	lda	Scr2+1
+	adc	Int3+1
+	sta	Ptr0+1
+
+	sec
+	lda	Int3
+	sbc	Int5
+	sta	Int0
+	lda	Int3+1
+	sbc	Int5+1
+	sta	Int0+1
+
+	clc
+	lda	Ptr2
+	adc	Int3
+	sta	Ptr1
+	lda	Ptr2+1
+	adc	Int3+1
+	sta	Ptr1+1
+	sec
+	lda	Ptr1
+	sbc	#1
+	sta	Ptr1
+	lda	Ptr1+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#0
+	lda	(Ptr1),Y		; Upper byte of second number
+	eor	#$FF			; Clone sign into all bits
+	rol	A
+	lda	#0
+	sbc	#0
+
+	jsr	SetBlk
+
+	lda	Int2			; Set to copy entire second number
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+
+int.__or__7
+	lda	Ptr2			; Copy second number to scratch
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr2
+	sta	Ptr1
+	lda	Scr2+1
+	sta	Ptr1+1
+	jsr	MovBlk
+
+	lda	Scr3
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	Scr2
+	sta	Ptr1
+	lda	Scr2+1
+	sta	Ptr1+1
+	lda	Int5
+	sta	Int0
+	sta	Int2
+	lda	Int5+1
+	sta	Int0+1
+	sta	Int2+1
+	jsr	IntOr			; Do the or
+
+	clc				; Point Ptr3 to the upper byte
+	lda	Scr3
+	adc	Int2
+	sta	Ptr3
+	lda	Scr3+1
+	adc	Int2+1
+	sta	Ptr3+1
+	sec
+	lda	Ptr3
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+	jmp	int.Condense
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__or__ - Or two objects.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__or__
+	jsr	ConvertBool0
+	bcs	object.__or__0		; None of the above
+
+	jsr	ConvertBool1
+	bcs	object.__or__0		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__or__
+
+	jmp	int.finish
+
+object.__or__0
+	ldx	#M_Or&$FF		; Report unsupported types
+	lda	#M_Or>>8
+	jmp	Unsupported
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; CompareStrings - Compare two strings.
+;
+; Input:
+;	Ptr0 = address of one string
+;	Ptr1 = address of another string
+;
+; Output:
+;	A = 0 if they are equal
+;	  = -1 if the first string is lower
+;	  = 1 if the first string is higher
+;	Z and N Flags set accordingly
+;
+; Uses:
+;	Int0, Int1
+;
+CompareStrings
+	ldy	#1			; Get string lengths
+	lda	(Ptr0),Y
+	sta	Int0
+	lda	(Ptr1),Y
+	sta	Int1
+
+	iny
+	lda	(Ptr0),Y
+	sta	Int0+1
+	lda	(Ptr1),Y
+	sta	Int1+1
+
+	clc				; Point to the actual string contents
+	lda	Ptr0
+	adc	#3
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	clc
+	lda	Ptr1
+	adc	#3
+	sta	Ptr1
+	lda	Ptr1+1
+	adc	#0
+	sta	Ptr1+1
+
+	ldy	#0			; Start with first characters
+
+CompareStrings0
+	lda	Int0			; Any remaining in the first string?
+	ora	Int0+1
+	beq	CompareStrings4		; No
+
+	lda	Int1			; Any remaining in the second string?
+	ora	Int1+1
+	beq	CompareStrings2		; No, it is shorter and lower
+
+	lda	(Ptr0),Y
+	cmp	(Ptr1),Y
+	bne	CompareStrings1		; Branch if mismatch
+
+	sec				; Decrement first string length
+	lda	Int0
+	sbc	#1
+	sta	Int0
+	lda	Int0+1
+	sbc	#0
+	sta	Int0+1
+
+	sec				; Decrement second string length
+	lda	Int1
+	sbc	#1
+	sta	Int1
+	lda	Int1+1
+	sbc	#0
+	sta	Int1+1
+
+	iny				; Address next pair of characters
+	bne	CompareStrings0		; Branch if still on same page
+
+	inc	Ptr0+1			; Advance to next page
+	inc	Ptr1+1
+
+	jmp	CompareStrings0
+
+CompareStrings1
+	bcc	CompareStrings3
+
+CompareStrings2
+	lda	#1
+	rts
+
+CompareStrings3
+	lda	#-1
+	rts
+
+CompareStrings4
+	lda	Int1			; Any remaining in the second string?
+	ora	Int1+1
+	bne	CompareStrings3		; 2nd longer, 1st lower
+
+	lda	#0			; Strings are the same length and
+	rts				;   are equal
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; DifferenceIs0 - Determines whether the difference is 0
+;
+; Input:
+;	Int2 = length of the difference
+;	Scr3 = address of the difference
+;
+; Output:
+;	Z set if the difference is 0
+;
+; Uses:
+;
+DifferenceIs0
+	lda	Int2			; 0 if length is 1 and a single 0
+	cmp	#1
+	bne	DifferenceIs0a
+	lda	Int2+1
+	bne	DifferenceIs0a
+	tay
+	lda	(Scr3),Y
+
+DifferenceIs0a
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__eq__ - Compare two objects for equal.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	A:X = address of the result
+;
+; Uses:
+;
+object.__eq__
+	jsr	ConvertBool0
+	bcs	object.__eq__2		; String or other
+
+	jsr	ConvertBool1
+	bcs	object.__eq__3		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__sub__
+
+	jsr	DifferenceIs0
+	bne	object.__eq__1
+
+object.__eq__0
+	ldx	#True&$FF		; Indicate equal
+	lda	#True>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__eq__1
+	ldx	#False&$FF		; Indicate not equal
+	lda	#False>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__eq__2
+	bne	object.__eq__3		; Not a string
+
+	lda	(Ptr1),Y		; Get type of second operand
+
+	cmp	#TYPE_STRING
+	bne	object.__eq__3
+
+	jsr	CompareStrings
+
+	beq	object.__eq__0
+	jmp	object.__eq__1
+
+object.__eq__3
+	jmp	object.__eq__1		; Everything else is False for now
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__ne__ - Compare two objects for not equal.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	A:X = address of the result
+;
+; Uses:
+;
+object.__ne__
+	jsr	ConvertBool0
+	bcs	object.__ne__2		; String or other
+
+	jsr	ConvertBool1
+	bcs	object.__ne__1		; None of the above - not equal
+
+	jsr	FinishConvertBool
+	jsr	int.__sub__
+
+	jsr	DifferenceIs0
+	bne	object.__ne__1
+
+object.__ne__0
+	ldx	#False&$FF		; Indicate equal
+	lda	#False>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__ne__1
+	ldx	#True&$FF		; Indicate not equal
+	lda	#True>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__ne__2
+	bne	object.__ne__3		; Not a string
+
+	lda	(Ptr1),Y		; Get type of second operand
+
+	cmp	#TYPE_STRING
+	bne	object.__ne__1		; Not string - not equal
+
+	jsr	CompareStrings
+
+	beq	object.__ne__0
+	jmp	object.__ne__1
+
+object.__ne__3
+	lda	(Ptr0),Y		; Reget type of first
+	cmp	(Ptr1),Y		; Not equal if the types are different
+	bne	object.__ne__1
+
+	jmp	object.__ne__1		; All NE for now
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; GetHighByte - Get the high byte of an integer
+;
+; Input:
+;	Scr3 = scratch area containing the integer
+;	Int2 = the number of bytes in the integer
+;
+; Output:
+;	A = the high byte of the integer
+;	Z and N Flags set accordingly
+;
+; Uses:
+;	Ptr2
+;
+GetHighByte
+	clc
+	lda	Scr3
+	adc	Int2
+	sta	Ptr2
+	lda	Scr3+1
+	adc	Int2+1
+	sta	Ptr2+1
+	sec
+	lda	Ptr2
+	sbc	#1
+	sta	Ptr2
+	lda	Ptr2+1
+	sbc	#0
+	sta	Ptr2+1
+	lda	(Ptr2),Y
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__le__ - Compare two objects for less than or equal.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	A:X = address of the result
+;
+; Uses:
+;	Ptr2
+;
+object.__le__
+	jsr	ConvertBool0
+	bcs	object.__le__3		; String or other
+
+	jsr	ConvertBool1
+	bcs	object.__le__4		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__sub__
+
+	jsr	DifferenceIs0
+	bne	object.__le__2
+
+object.__le__0
+	ldx	#True&$FF		; Indicate not less than or equal
+	lda	#True>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__le__1
+	ldx	#False&$FF		; Indicate less than or equal
+	lda	#False>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__le__2
+	jsr	GetHighByte		; Get high order byte of difference
+
+	bmi	object.__le__0
+	jmp	object.__le__1
+
+object.__le__3
+	bne	object.__le__4		; Not a string
+
+	lda	(Ptr1),Y		; Get type of second operand
+
+	cmp	#TYPE_STRING
+	bne	object.__le__4
+
+	jsr	CompareStrings
+
+	beq	object.__le__0
+	bmi	object.__le__0
+	jmp	object.__le__1
+
+object.__le__4
+	ldx	#M_LE&$FF		; Report unorderable types
+	lda	#M_LE>>8
+	jmp	Unorderable
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__lt__ - Compare two objects for less than
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__lt__
+	jsr	ConvertBool0
+	bcs	object.__lt__2		; String or other
+
+	jsr	ConvertBool1
+	bcs	object.__lt__3		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__sub__
+
+	jsr	GetHighByte		; Get high order byte of difference
+
+	bmi	object.__lt__1
+
+object.__lt__0
+	ldx	#False&$FF		; Indicate not less than or equal
+	lda	#False>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__lt__1
+	ldx	#True&$FF		; Indicate less than or equal
+	lda	#True>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__lt__2
+	bne	object.__lt__3		; Not a string
+
+	lda	(Ptr1),Y		; Get type of second operand
+
+	cmp	#TYPE_STRING
+	bne	object.__lt__3
+
+	jsr	CompareStrings
+
+	bmi	object.__lt__1
+	jmp	object.__lt__0
+
+object.__lt__3
+	ldx	#M_LT&$FF		; Report unorderable types
+	lda	#M_LT>>8
+	jmp	Unorderable
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__ge__ - Compare two objects for greater than or equal.
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__ge__
+	jsr	ConvertBool0
+	bcs	object.__ge__2		; String or other
+
+	jsr	ConvertBool1
+	bcs	object.__ge__3		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__sub__
+
+	jsr	GetHighByte		; Get high order byte of difference
+
+	bpl	object.__ge__1
+
+object.__ge__0
+	ldx	#False&$FF		; Indicate not less than or equal
+	lda	#False>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__ge__1
+	ldx	#True&$FF		; Indicate less than or equal
+	lda	#True>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__ge__2
+	bne	object.__ge__3		; Not a string
+
+	lda	(Ptr1),Y		; Get type of second operand
+
+	cmp	#TYPE_STRING
+	bne	object.__ge__3
+
+	jsr	CompareStrings
+
+	bpl	object.__ge__1
+	jmp	object.__ge__0
+
+object.__ge__3
+	ldx	#M_GE&$FF		; Report unorderable types
+	lda	#M_GE>>8
+	jmp	Unorderable
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.__gt__ - Compare two objects for greater than
+;
+; Input:
+;	Ptr0 = address of one object
+;	Ptr1 = address of other object
+;
+; Output:
+;	PtrA = address of the result
+;
+; Uses:
+;
+object.__gt__
+	jsr	ConvertBool0
+	bcs	object.__gt__2		; String or other
+
+	jsr	ConvertBool1
+	bcs	object.__gt__3		; None of the above
+
+	jsr	FinishConvertBool
+	jsr	int.__sub__
+
+	jsr	DifferenceIs0
+	beq	object.__gt__0		; Equal is not greater than
+
+	jsr	GetHighByte		; Get high order byte of difference
+
+	bpl	object.__gt__1
+
+object.__gt__0
+	ldx	#False&$FF		; Indicate not less than or equal
+	lda	#False>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__gt__1
+	ldx	#True&$FF		; Indicate less than or equal
+	lda	#True>>8
+
+	stx	PtrA
+	sta	PtrA+1
+
+	rts
+
+object.__gt__2
+	bne	object.__gt__3		; Not a string
+
+	lda	(Ptr1),Y		; Get type of second operand
+
+	cmp	#TYPE_STRING
+	bne	object.__gt__3
+
+	jsr	CompareStrings
+
+	beq	object.__gt__0
+	bmi	object.__gt__0
+	jmp	object.__gt__1
+
+object.__gt__3
+	ldx	#M_GT&$FF		; Report unorderable types
+	lda	#M_GT>>8
+	jmp	Unorderable
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; bool.str - Convert a bool to string.
+;
+; Input:
+;	Register A = the bool value
+;
+; Output:
+;	Ptr0 = address of the string
+;
+bool.str
+	cmp	#$C0			; True?
+	bne	bool.str0
+
+	lda	#S_True&$FF
+	sta	Ptr0
+	lda	#S_True>>8
+	sta	Ptr0+1
+	rts
+
+bool.str0
+	lda	#S_False&$FF
+	sta	Ptr0
+	lda	#S_False>>8
+	sta	Ptr0+1
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; function.str - Convert a function to string.
+;
+; Input:
+;	Ptr0 = address of the function
+;
+; Output:
+;	Ptr0 = address of the string
+;
+function.str
+	lda	Ptr0			; Advance past function header
+	clc
+	adc	#5
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; scratch.realloc - Reallocate a scratch buffer.
+;
+; Input:
+;	Int2 = the needed size of the buffer
+;	Ptr3 = address of the scratch buffer variables:
+;		2 bytes for the address
+;		2 bytes for the size
+;
+; Output:
+;	The buffer is replaced if it is too small.
+;
+; Uses:
+;	Ptr0, Int0
+;
+scratch.realloc
+	ldy	#2			; Get current buffer length
+	lda	(Ptr3),Y
+	tax
+	iny
+	lda	(Ptr3),Y
+	cmp	Int2+1
+	bcc	scratch.realloc0
+
+	cpx	Int2
+	bcs	scratch.realloc2
+
+scratch.realloc0
+	lda	Int2			; Reallocate bigger scratch buffer
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+
+	ldy	#0
+	lda	(Ptr3),y
+	sta	Ptr0
+	iny
+	lda	(Ptr3),Y
+	sta	Ptr0+1
+	jsr	Free			; Free the old one first
+	jsr	Alloc			; Allocate a new one
+
+	ldy	#0
+	lda	Ptr0
+	sta	(Ptr3),Y
+	iny
+	lda	Ptr0+1
+	sta	(Ptr3),Y
+
+	ora	Ptr0			; Out of memory check
+	bne	scratch.realloc1
+
+	jmp	OutOfMemory
+
+scratch.realloc1
+	iny				; Remember buffer length
+	lda	Int2
+	sta	(Ptr3),Y
+	iny
+	lda	Int2+1
+	sta	(Ptr3),Y
+
+scratch.realloc2
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; IsZero - Determine whether an integer is zero.
+;
+; Input:
+;	Ptr0 = address of the integer
+;	Int0 = number of bytes in the integer
+;
+; Output:
+;	Z flag set if zero
+;
+IsZero
+	lda	#0
+
+IsZero0
+	ldy	#0			; Start of first page
+
+	ldx	Int0+1			; At least one full page remaining?
+	beq	IsZero1			; Branch if no
+
+	ldx	#0			; Set up to do entire page
+	dec	Int0+1			; One fewer whole page remaining
+
+	jmp	IsZero2
+
+IsZero1
+	ldx	Int0			; Any remaining on a partial page?
+	beq	IsZero3			; No
+
+	sty	Int0			; This will finish the partial page
+
+IsZero2
+	ora	(Ptr0),Y
+	bne	IsZero3
+	iny
+	dex				; More to do on this page?
+	bne	IsZero2			; Yes
+
+	inc	Ptr0+1			; Address next page
+
+	jmp	IsZero0			; Check for another page
+
+IsZero3
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; GetIntInfo - Get information for an integer.
+;
+; Input:
+;	Ptr0 = address of the integer
+;
+; Output:
+;	Ptr2 - the address of the integer bytes
+;	Int2 - the number of bytes in the integer + 1
+;	Int3 - the number of bytes in the integer
+;
+GetIntInfo
+	ldy	#0			; Get object type
+	lda	(Ptr0),Y
+	and	#$C0
+	cmp	#$40
+	bne	GetIntInfo0		; Branch if big int
+
+	lda	Ptr0			; Stash address of the integer
+	clc
+	adc	#1
+	sta	Ptr2
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr2+1
+
+					; Get length of integer
+	clc				; Add 1 in case of MININT value
+	lda	(Ptr0),Y
+	and	#$3F
+	sta	Int3
+	adc	#1
+	sta	Int2
+	sty	Int2+1
+	sty	Int3+1
+
+	rts
+
+GetIntInfo0
+	lda	Ptr0			; Stash address of the integer
+	clc
+	adc	#3
+	sta	Ptr2
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr2+1
+
+	ldy	#1			; Get length of integer
+	clc				; Add 1 in case of MININT value
+	lda	(Ptr0),Y
+	sta	Int3
+	adc	#1
+	sta	Int2
+	iny
+	lda	(Ptr0),Y
+	sta	Int3+1
+	adc	#0
+	sta	Int2+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; int.str - Convert an integer to string.
+;
+; Input:
+;	Ptr0 = address of the integer
+;
+; Output:
+;	Ptr0 = address of the string
+;
+; Uses:
+;	Int3 - the number of bytes in the integer
+;	Int4 - the number of digits
+;	Scr0 - the dividend
+;	Scr1 - the value 10
+;	Scr2 - the quotient
+;	Scr3 - the string buffer
+;
+int.str
+	jsr	GetIntInfo		; Get location and number of int bytes
+
+	lda	#Scr0&$FF		; Verify scratch space 0 length
+	sta	Ptr3
+	lda	#Scr0>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	#Scr1&$FF		; Verify scratch space 1 length
+	sta	Ptr3
+	lda	#Scr1>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	#Scr2&$FF		; Verify scratch space 2 length
+	sta	Ptr3
+	lda	#Scr2>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int3			; Get length of integer * 3
+	asl	A
+	sta	Int2
+	lda	Int3+1
+	rol	A
+	sta	Int2+1
+	dey
+	lda	Int3
+	clc
+	adc	Int2
+	sta	Int2
+	lda	Int3+1
+	adc	Int2+1
+	sta	Int2+1
+
+	lda	#Scr3&$FF		; Verify scratch space 3 length
+	sta	Ptr3
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Ptr2			; Copy integer to dividend
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	lda	Scr0
+	sta	Ptr1
+	lda	Scr0+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	lda	Scr0			; Determine address of high byte
+	clc
+	adc	Int3
+	sta	Ptr1
+	lda	Scr0+1
+	adc	Int3+1
+	sta	Ptr1+1
+	lda	Ptr1
+	sec
+	sbc	#1
+	sta	Ptr1
+	lda	Ptr1+1
+	sbc	#0
+	sta	Ptr1+1
+
+	ldy	#0			; Is the number negative
+	lda	(Ptr1),Y
+	sta	Byt0			; Remember it
+	bpl	int.str0
+
+	lda	Scr0			; Negate the number
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IntNegate
+
+	ldy	#0			; MININT if upper byte is the same
+	lda	(Ptr1),Y
+	cmp	Byt0
+	bne	int.str0
+
+	iny				; Need an extra byte to handle it
+	lda	#0
+	sta	(Ptr1),Y
+	lda	Int3
+	clc
+	adc	#1
+	sta	Int3
+	lda	Int3+1
+	adc	#0
+	sta	Int3+1
+
+int.str0
+	lda	Scr2			; Initially, quotient is 0
+	sta	Ptr0
+	lda	Scr2+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	SetBlk
+
+	lda	#0			; Initially no digits
+	sta	Int4
+	sta	Int4+1
+
+	lda	Scr3			; Build converted number backward
+	clc
+	adc	ScrLen3
+	sta	Ptr3
+	lda	Scr3+1
+	adc	ScrLen3+1
+	sta	Ptr3+1
+
+int.str1
+	lda	Scr1			; Divisor is 10
+	sta	Ptr0
+	lda	Scr1+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	SetBlk
+	ldy	#0
+	lda	#10
+	sta	(Scr1),Y
+
+	lda	Int3			; Divide dividend by 10
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IDivMod
+
+	lda	Ptr3			; Remainder is next digit
+	sec
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+	ldy	#0
+	lda	(Scr0),Y
+	clc
+	adc	#'0'
+	sta	(Ptr3),Y
+
+	lda	Int4			; Count the digit
+	clc
+	adc	#1
+	sta	Int4
+	lda	Int4+1
+	adc	#0
+	sta	Int4+1
+
+	lda	Scr2			; Copy quotient to dividend
+	sta	Ptr0
+	lda	Scr2+1
+	sta	Ptr0+1
+	lda	Scr0
+	sta	Ptr1
+	lda	Scr0+1
+	sta	Ptr1+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	lda	Scr0			; Repeat if the dividend is not zero
+	sta	Ptr0
+	lda	Scr0+1
+	sta	Ptr0+1
+	lda	Int3
+	sta	Int0
+	lda	Int3+1
+	sta	Int0+1
+	jsr	IsZero
+	bne	int.str1
+
+	lda	Byt0			; Is the number negative?
+	bpl	int.str2
+
+	lda	Ptr3			; Add a minus sign
+	sec
+	sbc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	sbc	#0
+	sta	Ptr3+1
+	ldy	#0
+	lda	#'-'
+	sta	(Ptr3),Y
+
+	lda	Int4			; Count the minus sign
+	clc
+	adc	#1
+	sta	Int4
+	lda	Int4+1
+	adc	#0
+	sta	Int4+1
+
+int.str2
+	lda	Int4			; Allocate result string
+	clc
+	adc	#3
+	sta     Int0
+	lda	Int4+1
+	adc	#0
+	sta	Int0+1
+	jsr	Alloc
+
+	lda	Ptr0			; Stash memory address
+	sta	Ptr1
+	sta	Ptr2
+	lda	Ptr0+1
+	sta	Ptr1+1
+	sta	Ptr2+1
+
+	ora	Ptr0			; Out of memory check
+	bne	int.str3
+
+	jmp	OutOfMemory
+
+int.str3
+	lda	Ptr3			; Copy string into memory block
+	sta	Ptr0
+	lda	Ptr3+1
+	sta	Ptr0+1
+	lda	Ptr1
+	clc
+	adc	#3
+	sta	Ptr1
+	lda	Ptr1+1
+	adc	#0
+	sta	Ptr1+1
+	lda	Int4
+	sta	Int0
+	lda	Int4+1
+	sta	Int0+1
+	jsr	MovBlk
+
+	lda	Ptr2			; Recover memory address
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+
+	ldy	#0			; Finish making it an official string
+	lda	#TYPE_STRING
+	sta	(Ptr0),Y
+	iny
+	lda	Int4
+	sta	(Ptr0),Y
+	iny
+	lda	Int4+1
+	sta	(Ptr0),Y
+
+	rts				; Phew!
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; ConcatWhere - Determine where to concatenate to a string.
+;
+; Input:
+;	Ptr4 = address of the target string
+;
+; Output:
+;	Ptr1 = address of next character in the string
+;
+ConcatWhere
+	lda	Ptr4			; Determine start of the string
+	clc
+	adc	#3
+	sta	Ptr1
+	lda	Ptr4+1
+	adc	#0
+	sta	Ptr1+1
+
+	ldy	#1			; Add current length of the string
+	lda	(Ptr4),Y
+	clc
+	adc	Ptr1
+	sta	Ptr1
+	iny
+	lda	(Ptr4),Y
+	adc	Ptr1+1
+	sta	Ptr1+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; ConcatChar - Concatenate a character to a string.
+;
+; Input:
+;	Ptr4 = address of the target string
+;	Register A = the character
+;
+; Uses
+;	Ptr1
+;
+; Assumptions:
+;	* Caller must assure memory block is big enough
+;
+ConcatChar
+	tax				; Save the character
+
+	jsr	ConcatWhere		; Determine where to concatenate
+
+	ldy	#0			; Add the character
+	txa
+	sta	(Ptr1),Y
+
+	ldy	#1			; Adjust string length
+	lda	(Ptr4),Y
+	clc
+	adc	#1
+	sta	(Ptr4),Y
+	iny
+	lda	(Ptr4),Y
+	adc	#0
+	sta	(Ptr4),Y
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; ConcatString - Concatenate a string to a string.
+;
+; Input:
+;	Ptr2 = address of the string to add
+;	Ptr4 = address of the target string
+;
+; Uses
+;	Ptr0, Ptr1, Int0
+;
+; Assumptions:
+;	* Caller must assure memory block is big enough
+;
+ConcatString
+	jsr	ConcatWhere		; Determine where to concatenate
+
+	ldy	#1			; Get length of the added string
+	lda	(Ptr2),Y
+	sta	Int0
+	iny
+	lda	(Ptr2),Y
+	sta	Int0+1
+
+	lda	Ptr2			; Determine start of that string
+	clc
+	adc	#3
+	sta	Ptr0
+	lda	Ptr2+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#1			; Adjust string length
+	lda	(Ptr4),Y
+	clc
+	adc	Int0
+	sta	(Ptr4),Y
+	iny
+	lda	(Ptr4),Y
+	adc	Int0+1
+	sta	(Ptr4),Y
+
+	jsr	MovBlk			; Copy new content
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; CopyString - Copy a string to a string.
+;
+; Input:
+;	Ptr4 = address of the string to copy
+;	Ptr0 = address of the target string
+;
+; Uses
+;	Ptr1, Int0
+;
+; Assumptions:
+;	* Caller must assure memory block is big enough
+;
+CopyString
+	lda	Ptr0			; Set destination
+	sta	Ptr1
+	lda	Ptr0+1
+	sta	Ptr1+1
+
+	ldy	#1			; Get length of the old string
+	lda	(Ptr4),Y
+	clc
+	adc	#3			; Including header
+	sta	Int0
+	iny
+	lda	(Ptr4),Y
+	adc	#0
+	sta	Int0+1
+
+	lda	Ptr4			; Copy whole string including header
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	jsr	MovBlk
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; tuple.str - Convert a tuple to string.
+;
+; Input:
+;	Ptr0 = address of the object
+;	Byt0 = 0 for one-byte pair count, 1 for two-byte count
+;
+; Output:
+;	Ptr0 = address of the string
+;	Byt0 = 0 for one-byte pair count, 1 for two-byte count
+;
+; Uses:
+;	Int3 - the number of tuple objects left
+;	Ptr3 - the address of the next object
+;	Ptr4 - the string in progress
+;
+tuple.str
+	lda	ReprStr			; Save repr string state
+	pha
+
+	lda	#1			; Format strings inside a tuple
+	sta	ReprStr			;   with repr instead of str
+
+	lda	Ptr0			; Get address of next object
+	sta	Ptr3			; Note: increment before use
+	lda	Ptr0+1
+	sta	Ptr3+1
+
+	ldy	#1			; Get number of objects
+	lda	(Ptr0),Y
+	sta	Int3
+	lda	#0
+	sta	Int3+1
+
+	ldx	Byt0			; Single byte count?
+	beq	tuple.str0		; Branch if yes
+
+	iny				; Get second byte
+	lda	(Ptr0),Y
+	sta	Int3+1
+
+	lda	Ptr3			; Skip the extra byte
+	clc
+	adc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+tuple.str0
+	lda	#2+3			; Start the output string
+	sta	Int0			; Room for empty tuple '()'
+	lda	#0			;   and string header
+	sta	Int0+1
+	jsr	Alloc
+	lda	Ptr0
+	sta	Ptr4
+	lda	Ptr0+1
+	sta	Ptr4+1
+
+	ora	Ptr0			; Out of memory check
+	bne	tuple.str1
+
+	jmp	OutOfMemory
+
+tuple.str1
+
+	lda	#1
+	sta	Byt0			; First time
+
+	ldy	#0			; Initially '('
+	lda	#TYPE_STRING
+	sta	(Ptr4),Y
+	iny
+	lda	#1
+	sta	(Ptr4),Y
+	iny
+	lda	#0
+	sta	(Ptr4),Y
+	iny
+	lda	Byt2
+	sta	(Ptr4),Y
+
+	lda	Int3			; Any more objects?
+	ora	Int3+1
+	bne	tuple.str2
+
+	jmp	tuple.str7
+
+tuple.str2
+	lda	Int3			; Decrement object count
+	sec
+	sbc	#1
+	sta	Int3
+	lda	Int3+1
+	sbc	#0
+	sta	Int3+1
+
+	lda	Ptr3			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+	ldy	#0			; Get next object
+	lda	(Ptr3),Y
+	sta	Ptr0
+	iny
+	lda	(Ptr3),Y
+	sta	Ptr0+1
+
+	lda	Int3+1			; Save my variables
+	pha
+	lda	Int3
+	pha
+	lda	Ptr3+1
+	pha
+	lda	Ptr3
+	pha
+	lda	Ptr4+1
+	pha
+	lda	Ptr4
+	pha
+	lda	Byt3
+	pha
+	lda	Byt0
+	pha
+
+	jsr	object.str		; Convert object to string
+
+	pla				; Recover my variables
+	sta	Byt0
+	pla
+	sta	Byt3
+	pla
+	sta	Ptr4
+	pla
+	sta	Ptr4+1
+	pla
+	sta	Ptr3
+	pla
+	sta	Ptr3+1
+	pla
+	sta	Int3
+	pla
+	sta	Int3+1
+
+	lda	Ptr0			; Save address of new string fragment
+	sta	Ptr2
+	lda	Ptr0+1
+	sta	Ptr2+1
+
+	ldy	#1			; Get length of new string fragment
+	lda	(Ptr2),Y
+	clc
+	adc	#3+3			; Plus room for ', ', ')'
+	sta	Int0			;   and string header
+	iny
+	lda	(Ptr2),Y
+	adc	#0
+	sta	Int0+1
+
+	dey				; Add length of current string
+	lda	(Ptr4),Y
+	adc	Int0
+	sta	Int0
+	iny
+	lda	(Ptr4),Y
+	adc	Int0+1
+	sta	Int0+1
+
+	jsr	Alloc			; Allocate a new string
+
+	lda	Ptr0			; Remember the new string address
+	sta	Ptr5
+	lda	Ptr0+1
+	sta	Ptr5+1
+
+	ora	Ptr0			; Out of memory check
+	bne	tuple.str3
+
+	jmp	OutOfMemory
+
+tuple.str3
+	jsr	CopyString		; Copy current string to new
+
+	lda	Ptr4			; Free the old string
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	jsr	Free
+
+	lda	Ptr5			; Use the enlarged string
+	sta	Ptr4
+	lda	Ptr5+1
+	sta	Ptr4+1
+
+	lda	Byt0			; Is this the first one?
+	bne	tuple.str4		; Branch if yes
+
+	lda	#','			; Add ', '
+	jsr	ConcatChar
+	lda	#' '
+	jsr	ConcatChar
+
+tuple.str4
+	jsr	ConcatString		; Add the new object string
+
+	ldx	Ptr2			; Free the new string fragment
+	lda	Ptr2+1
+	jsr	DeRef			; Remove reference, free if 0
+
+	lda	Byt0			; Is this the first one?
+	beq	tuple.str5		; Branch if no
+
+	lda	#0			; No longer the first one
+	sta	Byt0
+
+	lda	Int3			; Was this the only object?
+	ora	Int3+1
+	bne	tuple.str6		; Branch if no
+
+	lda	#','			; Add ','
+	jsr	ConcatChar
+
+	jmp	tuple.str7
+
+tuple.str5
+	lda	Int3			; Any more objects?
+	ora	Int3+1
+	beq	tuple.str7
+
+tuple.str6
+	jmp	tuple.str2
+
+tuple.str7
+	lda	Byt3			; Close the tuple
+	jsr	ConcatChar
+
+	lda	Ptr4			; Return string in Ptr0
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+
+	pla				; Recover saved repr string state
+	sta	ReprStr
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; dictionary.str - Convert a dictionary to string.
+;
+; Input:
+;	Ptr0 = address of the object
+;
+; Output:
+;	Ptr0 = address of the string
+;	Byt0 = 0 for one-byte pair count, 1 for two-byte count
+;
+; Uses:
+;	Int3 - the number of dictionary key/value pairs left
+;	Ptr3 - the address of the next object
+;	Ptr4 - the string in progress
+;
+dictionary.str
+	lda	ReprStr			; Save repr string state
+	pha
+
+	lda	#1			; Format strings inside a dictionary
+	sta	ReprStr			;   with repr instead of str
+
+	lda	Ptr0			; Get address of next object
+	sta	Ptr3			; Note: increment before use
+	lda	Ptr0+1
+	sta	Ptr3+1
+
+	ldy	#1			; Get number of key/value pairs
+	lda	(Ptr0),Y
+	sta	Int3
+	lda	#0
+	sta	Int3+1
+
+	ldx	Byt0			; Single byte count?
+	beq	dictionary.str0		; Branch if yes
+
+	iny				; Get second byte
+	lda	(Ptr0),Y
+	sta	Int3+1
+
+	lda	Ptr3			; Skip the extra byte
+	clc
+	adc	#1
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+dictionary.str0
+	lda	#2+3			; Start the output string
+	sta	Int0			; Room for empty dictionary '{}'
+	lda	#0			;   and string header
+	sta	Int0+1
+	jsr	Alloc
+	lda	Ptr0
+	sta	Ptr4
+	lda	Ptr0+1
+	sta	Ptr4+1
+
+	ora	Ptr0			; Out of memory check
+	bne	dictionary.str1
+
+	jmp	OutOfMemory
+
+dictionary.str1
+	lda	#1
+	sta	Byt0			; First time
+
+	ldy	#0			; Initially '{'
+	lda	#TYPE_STRING
+	sta	(Ptr4),Y
+	iny
+	lda	#1
+	sta	(Ptr4),Y
+	iny
+	lda	#0
+	sta	(Ptr4),Y
+	iny
+	lda	#'{'
+	sta	(Ptr4),Y
+
+	lda	Int3			; Any more pairs?
+	ora	Int3+1
+	bne	dictionary.str2
+
+	jmp	dictionary.str5
+
+dictionary.str2
+	lda	Int3			; Decrement pair count
+	sec
+	sbc	#1
+	sta	Int3
+	lda	Int3+1
+	sbc	#0
+	sta	Int3+1
+
+	lda	Ptr3			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+	ldy	#0			; Get key object
+	lda	(Ptr3),Y
+	sta	Ptr0
+	iny
+	lda	(Ptr3),Y
+	sta	Ptr0+1
+
+	lda	Int3+1			; Save my variables
+	pha
+	lda	Int3
+	pha
+	lda	Ptr4+1
+	pha
+	lda	Ptr4
+	pha
+	lda	Byt0
+	pha
+	lda	Ptr3+1
+	pha
+	lda	Ptr3
+	pha
+
+	jsr	object.str		; Convert key to string
+
+	lda	Ptr0			; Save key string
+	sta	Ptr2
+	lda	Ptr0+1
+	sta	Ptr2+1
+
+	pla				; Recover object pointer
+	sta	Ptr3
+	pla
+	sta	Ptr3+1
+
+	lda	Ptr3			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+	ldy	#0			; Get value object
+	lda	(Ptr3),Y
+	sta	Ptr0
+	iny
+	lda	(Ptr3),Y
+	sta	Ptr0+1
+
+	lda	Ptr3+1			; Save variables
+	pha
+	lda	Ptr3
+	pha
+	lda	Ptr2+1
+	pha
+	lda	Ptr2
+	pha
+
+	jsr	object.str		; Convert value to string
+
+	pla				; Recover my variables
+	sta	Ptr2
+	pla
+	sta	Ptr2+1
+	pla
+	sta	Ptr3
+	pla
+	sta	Ptr3+1
+	pla
+	sta	Byt0
+	pla
+	sta	Ptr4
+	pla
+	sta	Ptr4+1
+	pla
+	sta	Int3
+	pla
+	sta	Int3+1
+
+	lda	Ptr0			; Save address of value string
+	sta	Ptr6
+	lda	Ptr0+1
+	sta	Ptr6+1
+
+	ldy	#1			; Get length of value string
+	lda	(Ptr2),Y
+	clc
+	adc	#5+3			; Plus room for ': ', ', ', '}'
+	sta	Int0			;   and string header
+	iny
+	lda	(Ptr2),Y
+	adc	#0
+	sta	Int0+1
+
+	dey				; Add length of key string
+	lda	(Ptr6),Y
+	clc
+	adc	Int0
+	sta	Int0
+	iny
+	lda	(Ptr6),Y
+	adc	Int0+1
+	sta	Int0+1
+
+	dey				; Add length of current string
+	lda	(Ptr4),Y
+	adc	Int0
+	sta	Int0
+	iny
+	lda	(Ptr4),Y
+	adc	Int0+1
+	sta	Int0+1
+
+	jsr	Alloc			; Allocate a new string
+
+	lda	Ptr0			; Remember the new string address
+	sta	Ptr5
+	lda	Ptr0+1
+	sta	Ptr5+1
+
+	ora	Ptr0			; Out of memory check
+	bne	dictionary.str3
+
+	jmp	OutOfMemory
+
+dictionary.str3
+	jsr	CopyString		; Copy current string to new
+
+	lda	Ptr4			; Free the old string
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+	jsr	Free
+
+	lda	Ptr5			; Use the enlarged string
+	sta	Ptr4
+	lda	Ptr5+1
+	sta	Ptr4+1
+
+	lda	Byt0			; Is this the first one?
+	bne	dictionary.str4
+
+	lda	#','			; Add ', '
+	jsr	ConcatChar
+	lda	#' '
+	jsr	ConcatChar
+
+dictionary.str4
+	jsr	ConcatString		; Add the key string
+
+	ldx	Ptr2			; Free the key string
+	lda	Ptr2+1
+	jsr	DeRef			; Remove reference, free if 0
+
+	lda	#':'			; Add ': '
+	jsr	ConcatChar
+	lda	#' '
+	jsr	ConcatChar
+
+	lda	Ptr6			; Add the value string
+	sta	Ptr2
+	lda	Ptr6+1
+	sta	Ptr2+1
+	jsr	ConcatString
+
+	ldx	Ptr2			; Free the value string
+	lda	Ptr2+1
+	jsr	DeRef			; Remove reference, free if 0
+
+	lda	#0			; No longer the first one
+	sta	Byt0
+
+	lda	Int3			; Any more pairs?
+	ora	Int3+1
+	beq	dictionary.str5
+
+	jmp	dictionary.str2
+
+dictionary.str5
+	lda	#'}'			; Close the dictionary
+	jsr	ConcatChar
+
+	lda	Ptr4			; Return string in Ptr0
+	sta	Ptr0
+	lda	Ptr4+1
+	sta	Ptr0+1
+
+	pla				; Recover saved repr string state
+	sta	ReprStr
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; str.repr - Convert a string to a representation.
+;
+; Input:
+;	Ptr0 = address of the object
+;
+; Output:
+;	Ptr0 = address of the string
+;
+str.repr
+	lda	#$27			; Default to ' for delimiter
+	sta	Byt1
+
+	ldy	#1			; Get length of string
+	lda	(Ptr0),Y
+	sta	Int0
+	iny
+	lda	(Ptr0),Y
+	sta	Int0+1
+
+	lda	Ptr0			; Get start of string
+	clc
+	adc	#3
+	sta	Ptr1
+	sta	Ptr2
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr1+1
+
+	sta	Ptr2+1			; Scan string for ' or "
+
+	lda	Int0			; Length
+	sta	Int1
+	lda	Int0+1
+	sta	Int1+1
+
+	ldy	#0
+
+str.repr0
+	lda	(Ptr2),Y		; Get a character
+	cmp	#'"'			; If it is a ", we use ' delimiter
+	beq	str.repr2
+
+	cmp	#$27			; If it is a ', we use " delimiter
+	beq	str.repr1
+
+	lda	Ptr2			; Increment pointer
+	clc
+	adc	#1
+	sta	Ptr2
+	lda	Ptr2+1
+	adc	#0
+	sta	Ptr2+1
+
+	lda	Int1			; Decrement count of chars
+	sec
+	sbc	#1
+	sta	Int1
+	lda	Int1+1
+	sbc	#0
+	sta	Int1+1
+
+	ora	Int1			; Repeat if not zero
+	bne	str.repr0
+
+	jmp	str.repr2		; Neither found, use the default
+
+str.repr1
+	lda	#'"'			; Use " as the delimiter
+	sta	Byt1
+
+str.repr2
+	lda	#0			; Initially no chars escaped
+	sta	Int2
+	sta	Int2+1
+
+	lda	Ptr1			; Scan string for escaped chars
+	sta	Ptr2
+	lda	Ptr1+1
+	sta	Ptr2+1
+
+	lda	Int0
+	sta	int1
+	lda	Int0+1
+	sta	Int1+1
+
+	ldy	#0
+
+str.repr3
+	lda	(Ptr2),Y		; Get a character
+	cmp	Byt1			; Is it the chosen delimiter
+	beq	str.repr4		; Yes, go count it
+
+	; Check other special characters here
+
+	jmp	str.repr5
+
+str.repr4
+	lda	Int2			; Increment count of escapes
+	clc
+	adc	#1
+	sta	Int2
+	lda	Int2+1
+	adc	#0
+	sta	Int2+1
+
+str.repr5
+	lda	Ptr2			; Increment pointer
+	clc
+	adc	#1
+	sta	Ptr2
+	lda	Ptr2+1
+	adc	#0
+	sta	Ptr2+1
+
+	lda	Int1			; Decrement count of chars
+	sec
+	sbc	#1
+	sta	Int1
+	lda	Int1+1
+	sbc	#0
+	sta	Int1+1
+
+	ora	Int1			; Repeat if not zero
+	bne	str.repr3
+
+	lda	Int2			; Take number of escapes plus
+	clc				;   the length of the string
+	adc	Int0			;   plus the two delimiters
+	sta	Int0			; That is the length of the result
+	lda	Int2+1
+	adc	Int0+1
+	sta	Int0+1
+	lda	Int0
+	clc
+	adc	#2
+	sta	Int3
+	lda	Int2+1
+	adc	Int0+1
+	sta	Int3+1
+
+	lda	Int3			; Add header for memory size
+	clc
+	adc	#3
+	sta	Int0
+	lda	Int3+1
+	adc	#0
+	sta	Int0+1
+
+	lda	Ptr0			; Save original string
+	sta	Ptr2
+	lda	Ptr0+1
+	sta	Ptr2+1
+
+	jsr	Alloc			; Allocate memory for the repr
+
+	lda	Ptr0			; Save new buffer address
+	sta	Ptr3
+	lda	Ptr0+1
+	sta	Ptr3+1
+
+	ora	Ptr0			; Out of memory check
+	bne	str.repr6
+
+	jmp	OutOfMemory
+
+str.repr6
+	ldy	#0			; Fill in string header
+	lda	#TYPE_STRING
+	sta	(Ptr0),Y
+	iny
+	lda	Int3
+	sta	(Ptr0),Y
+	iny
+	lda	Int3+1
+	sta	(Ptr0),Y
+	iny
+	lda	Byt1
+	sta	(Ptr0),Y
+
+	lda	Ptr0			; Point to beginning of buffer
+	clc
+	adc	#3+1			; Header plus opening delimiter
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#1			; Get length of string
+	lda	(Ptr2),Y
+	sta	Int1
+	iny
+	lda	(Ptr2),Y
+	sta	Int1+1
+
+	lda	Ptr2			; Get start of string
+	clc
+	adc	#3
+	sta	Ptr1
+	lda	Ptr2+1
+	adc	#0
+	sta	Ptr1+1
+
+	ldy	#0
+
+str.repr7
+	lda	(Ptr1),Y		; Get a character
+	tax				; Remember it
+	cmp	Byt1			; Is it the chosen delimiter
+	beq	str.repr9		; Escape it
+
+	; Check other characters here
+
+	jmp	str.repr10
+
+str.repr8
+
+str.repr9
+	lda	#'\'			; Generate the escape
+	sta	(Ptr0),Y
+
+	lda	Ptr0			; Increment buffer pointer
+	clc
+	adc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+str.repr10
+	txa				; Get the character back
+	sta	(Ptr0),Y		; Copy the character
+
+	lda	Ptr0			; Increment buffer pointer
+	clc
+	adc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	lda	Ptr1			; Increment character pointer
+	clc
+	adc	#1
+	sta	Ptr1
+	lda	Ptr1+1
+	adc	#0
+	sta	Ptr1+1
+
+	lda	Int1			; Decrement count of chars
+	sec
+	sbc	#1
+	sta	Int1
+	lda	Int1+1
+	sbc	#0
+	sta	Int1+1
+
+	ora	Int1			; Repeat if not zero
+	bne	str.repr7
+
+	lda	Byt1			; Plant closing delimiter
+	sta	(Ptr0),Y
+
+	lda	Ptr2			; Free incoming string
+	sta	Ptr0
+	lda	Ptr2+1
+	sta	Ptr0+1
+	jsr	Free
+
+	lda	Ptr3			; Return new string
+	sta	Ptr0
+	lda	Ptr3+1
+	sta	Ptr0+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; object.str - Convert an object to string.
+;
+; Input:
+;	Ptr0 = address of the object
+;
+; Output:
+;	Ptr0 = address of the string
+;
+object.str
+	lda	#0			; Presume not big type
+	sta	Byt0
+
+	ldy	#0			; Get variable type
+	lda	(Ptr0),Y
+	bne	object.str0
+
+	lda	#S_None&$FF		; None
+	sta	Ptr0
+	lda	#S_None>>8
+	sta	Ptr0+1
+
+	rts
+
+object.str0
+	and	#$40			; Is it an integer?
+	beq     object.str2		; Branch if no
+
+	lda	(Ptr0),Y
+	and	#$3F			; 0 length integer (bool)?
+	bne	object.str1		; Branch if no
+
+	lda	(Ptr0),Y
+	jmp	bool.str		; Convert bool to string
+
+object.str1
+	jmp	int.str			; Convert integer to string
+
+object.str2
+	lda	(Ptr0),Y
+
+	cmp	#TYPE_BIGINT		; Integer?
+	beq	object.str1
+
+	cmp	#TYPE_STRING		; String?
+	bne	object.str4
+
+	lda	ReprStr			; Use repr to convert string?
+	beq	object.str3		; branch if no
+
+	jmp	str.repr
+
+object.str3
+	ldx	Ptr0			; Increment reference as caller
+	stx	PtrA			;   expects a copy
+	lda	Ptr0+1
+	sta	PtrA+1
+	jmp	AddRef
+
+object.str4
+	cmp	#TYPE_FUNCTION		; Function?
+	bne	object.str5
+
+	jmp	function.str		; Convert function to string
+
+object.str5
+	cmp	#TYPE_TUPLE		; Tuple?
+	beq	object.str6
+
+	cmp	#TYPE_BIGTUPLE
+	bne	object.str7
+
+	inc	Byt0
+
+object.str6
+	lda	#'('			; Set delimiters
+	sta	Byt2
+	lda	#')'
+	sta	Byt3
+	jmp	tuple.str		; Convert tuple to string
+
+object.str7
+	cmp	#TYPE_LIST		; List?
+	beq	object.str8
+
+	cmp	#TYPE_BIGLIST
+	bne	object.str9
+
+	inc	Byt0
+
+object.str8
+	lda	#'['			; Set delimiters
+	sta	Byt2
+	lda	#']'
+	sta	Byt3
+	jmp	tuple.str		; Convert tuple to string
+
+object.str9
+	cmp	#TYPE_DICT		; Dictionary?
+	beq	object.str10
+
+	cmp	#TYPE_BIGDICT
+	bne	object.str11
+
+	inc	Byt0
+
+object.str10
+	jmp	dictionary.str		; Convert dictionary to string
+
+object.str11
+	lda	#0			; Indicate failure
+	sta	Ptr0
+	sta	Ptr0+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; DontWantAnyKeywordArgs
+;
+; Input:
+;	A:X = address of length word of string containing caller's name
+;	Kargs = address of dictionary containing keyword arguments
+;
+; Output:
+;	Error message issued and program terminated
+;
+DontWantAnyKeywordArgs
+	pha				; Stash caller's name
+	txa
+	pha
+
+	lda	Kargs			; Check for keyword arguments
+	ora	Kargs+1
+	beq	DontWantAnyKeywordArgs1	; No keyword dictionary
+
+	lda	Kargs			; Get address of next object
+	sta	Ptr3			; Note: increment before use
+	lda	Kargs+1
+	sta	Ptr3+1
+
+	ldy	#1			; Get number of objects
+	lda	(Kargs),Y
+	sta	Int3
+	lda	#0
+	sta	Int3+1
+
+	lda	Int3			; Any objects?
+	ora	Int3+1
+	bne	DontWantAnyKeywordArgs2	; None
+
+DontWantAnyKeywordArgs1
+	pla				; Throw away caller's name
+	pla
+
+	rts
+
+DontWantAnyKeywordArgs2
+	lda	Ptr3			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+	ldy	#0			; Get first object
+	lda	(Ptr3),Y
+	sta	Ptr0
+	iny
+	lda	(Ptr3),Y
+	sta	Ptr0+1
+
+	pla				; Complain and quit
+	tax
+	pla
+;	jmp	UnexpectedKeyword	;;; Fall through
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; UnexpectedKeyword
+;
+; Input:
+;	A:X = address of length word of string containing caller's name
+;	Ptr0 = address of string object containing keyword tag
+;
+; Output:
+;	Error message issued and program terminated
+;
+UnexpectedKeyword
+	pha				; Stash caller's name
+	txa
+	pha
+
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	pla				; Recover caller's name
+	tax
+	pla
+	jsr	sys.stdout.write
+
+	ldx	#M_UnexpectedKey&$FF
+	lda	#M_UnexpectedKey>>8
+	jsr	sys.stdout.write
+
+	lda	Ptr0			; Display offending keyword
+	clc
+	adc	#1
+	tax
+	lda	Ptr0+1
+	adc	#0
+	jsr	sys.stdout.write
+
+	ldx	#M_Quote&$FF
+	lda	#M_Quote>>8
+	jsr	sys.stdout.write
+
+	jmp	CRLFExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; OUTDEC - output a small decimal number
+;
+; Input:
+;	A = the number
+;
+; Output:
+;	the number is converted and output
+;
+OUTDEC
+	pha				; Stash the number
+
+	lda	#M_Num&$FF		; Point Ptr0 to template
+	sta	Ptr0
+	lda	#M_Num>>8
+	sta	Ptr0+1
+
+	pla				; Recover the number
+
+	ldy	#2			; Index first digit of the number
+
+	ldx	#0			; Zero count
+
+OUTDEC0
+	cmp	#100			; Any more hundreds?
+	bcc	OUTDEC1			; No
+
+	sec				; Subtract a hundred
+	sbc	#100
+	inx
+
+	jmp	OUTDEC0
+
+OUTDEC1
+	cpx	#0			; No hundreds?
+	bne	OUTDEC2			; Not zero
+
+	cpy	#2			; Leading zero?
+	beq	OUTDEC3			; Yes, suppress
+
+OUTDEC2
+	pha				; Stash the number
+
+	txa				; Get count
+
+	clc				; Convert to ASCII
+	adc	#'0'
+
+	sta	(Ptr0),Y		; Put in output
+	iny
+
+	pla				; Recover the number
+
+OUTDEC3
+	ldx	#0			; Zero count
+
+OUTDEC4
+	cmp	#10			; Any more tens
+	bcc	OUTDEC5			; No
+
+	sec				; Subtract ten
+	sbc	#10
+	inx
+
+	jmp	OUTDEC4
+
+OUTDEC5
+	cpx	#0			; No tens?
+	bne	OUTDEC6			; Not zero
+
+	cpy	#2			; Leading zero?
+	beq	OUTDEC7			; Yes, suppress
+
+OUTDEC6
+	pha				; Stash the number
+
+	txa				; Get count
+
+	clc				; Convert to ASCII
+	adc	#'0'
+
+	sta	(Ptr0),Y		; Put in output
+	iny
+
+	pla				; Recover the number
+
+OUTDEC7
+	clc				; Convert ones to ASCII
+	adc	#'0'
+
+	sta	(Ptr0),Y		; Put in output
+	iny
+
+	tya				; Get index
+	sec				; Convert to number length
+	sbc	#2
+
+	ldy	#0			; Update nember length
+	sta	(Ptr0),Y
+
+	ldx	Ptr0			; Output the number
+	lda	Ptr0+1
+	jsr	sys.stdout.write
+
+	rts
+
+M_Num	msg	"   "
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; MismatchedArgs
+;
+; Input:
+;	X = number of arguments expected
+;	A = number of arguments found
+;	Ptr0 = address of length word of string containing caller's name
+;
+; Output:
+;	Error message issued and program terminated
+;
+MismatchedArgs
+	pha				; Stash number of args found
+	txa				; And number expected
+	pha
+
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	lda	Ptr0+1
+	jsr	sys.stdout.write
+
+	ldx	#M_Takes&$FF
+	lda	#M_Takes>>8
+	jsr	sys.stdout.write
+
+	pla				; Recover number of args expected
+	jsr	OUTDEC
+
+	ldx	#M_Parg&$FF
+	lda	#M_Parg>>8
+	jsr	sys.stdout.write
+
+	pla				; Recover number of args found
+	jsr	OUTDEC
+
+	ldx	#M_Given&$FF
+	lda	#M_Given>>8
+	jsr	sys.stdout.write
+
+	jmp	CRLFExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; NotIntegral
+;
+; Input:
+;	A:X = address of length word of string containing caller's name
+;	Var = address of the uncompatible object
+;
+; Output:
+;	Error message issued and program terminated
+;
+NotIntegral
+	stx	Ptr0
+	sta	Ptr0+1
+
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	lda	Ptr0+1
+	jsr	sys.stdout.write
+
+	ldx	#M_CantInterpret&$FF
+	lda	#M_CantInterpret>>8
+	jsr	sys.stdout.write
+
+	jsr	VarType
+
+	ldx	#M_AsInteger&$FF
+	lda	#M_AsInteger>>8
+	jsr	sys.stdout.write
+
+	jmp	CRLFExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; TooManyArgs
+;
+; Input:
+;	X = max number of arguments expected
+;	A = number of arguments found
+;	Ptr0 = address of length word of string containing caller's name
+;
+; Output:
+;	Error message issued and program terminated
+;
+TooManyArgs
+	pha				; Stash number of args found
+	txa				; And number expected
+	pha
+
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	lda	Ptr0+1
+	jsr	sys.stdout.write
+
+	ldx	#M_TakesAtMost&$FF
+	lda	#M_TakesAtMost>>8
+	jsr	sys.stdout.write
+
+	pla				; Recover number of args expected
+	jsr	OUTDEC
+
+	ldx	#M_Arg&$FF
+	lda	#M_Arg>>8
+	jsr	sys.stdout.write
+
+	pla				; Recover number of args found
+	jsr	OUTDEC
+
+	ldx	#M_Given&$FF
+	lda	#M_Given>>8
+	jsr	sys.stdout.write
+
+	ldx	#M_Close&$FF
+	lda	#M_Close>>8
+	jsr	sys.stdout.write
+
+	jmp	CRLFExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; NotStringOrNum
+;
+; Input:
+;	X = max number of arguments expected
+;	A = number of arguments found
+;	Ptr0 = address of length word of string containing caller's name
+;	Var = address of object
+;
+; Output:
+;	Error message issued and program terminated
+;
+NotStringOrNum
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	lda	Ptr0+1
+	jsr	sys.stdout.write
+
+	ldx	#M_MustBeStringOrNum&$FF
+	lda	#M_MustBeStringOrNum>>8
+	jsr	sys.stdout.write
+
+	jsr	VarType
+
+	ldx	#M_Quote&$FF
+	lda	#M_Quote>>8
+	jsr	PutStrCRLF
+
+	jmp	CRLFExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; CannotConvertNonString
+;
+; Input:
+;	Ptr0 = address of length word of string containing caller's name
+;
+; Output:
+;	Error message issued and program terminated
+;
+CannotConvertNonString
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	lda	Ptr0+1
+	jsr	sys.stdout.write
+
+	ldx	#M_NonString&$FF
+	lda	#M_NonString>>8
+	jsr	sys.stdout.write
+
+	jmp	CRLFExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; BadBase
+;
+; Input:
+;	Ptr0 = address of length word of string containing caller's name
+;
+; Output:
+;	Error message issued and program terminated
+;
+BadBase
+	ldx	#M_ValueError&$FF
+	lda	#M_ValueError>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	lda	Ptr0+1
+	jsr	sys.stdout.write
+
+	ldx	#M_BadBase&$FF
+	lda	#M_BadBase>>8
+	jsr	sys.stdout.write
+
+	jmp	CRLFExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; InvalidLiteral
+;
+; Input:
+;	Ptr0 = address of length word of string containing caller's name
+;
+; Output:
+;	Error message issued and program terminated
+;
+InvalidLiteral
+	ldx	#M_ValueError&$FF
+	lda	#M_ValueError>>8
+	jsr	sys.stdout.write
+
+	ldx	#M_InvalidLiteral&$FF
+	lda	#M_InvalidLiteral>>8
+	jsr	sys.stdout.write
+
+	ldx	Ptr0
+	lda	Ptr0+1
+	jsr	sys.stdout.write
+
+	ldx	#M_WithBase&$FF
+	lda	#M_WithBase>>8
+	jsr	sys.stdout.write
+
+	lda	Byt2			; Show number base
+	jsr	OUTDEC
+
+	ldx	#M_ColonSpaceQuote&$FF
+	lda	#M_ColonSpaceQuote>>8
+	jsr	sys.stdout.write
+
+	clc
+	lda	Ptr2
+	adc	#1
+	tax
+	lda	Ptr2+1
+	adc	#0
+	jsr	sys.stdout.write
+
+	ldx	#M_Quote&$FF
+	lda	#M_Quote>>8
+	jsr	PutStrCRLF
+
+	jmp	CRLFExit
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Peek - Return the contents of a memory location.
+;
+; Input:
+;	Pargs[0] = integer containing memory address
+;
+; Output:
+;	A:X and PtrA -> integer containing value at that memory location
+;
+Peek
+	ldx	#N_Peek&$FF		; Check for keyword arguments
+	lda	#N_Peek>>8
+	jsr	DontWantAnyKeywordArgs
+
+	lda	Pargs
+	sta	Ptr0
+	lda	Pargs+1
+	sta	Ptr0+1
+	ora	Pargs
+	beq	Peek0			; No positional arguments
+
+	ldy	#1			; Get number of objects
+	lda	(Pargs),Y
+
+	cmp	#1			; One positional argument?
+	beq	Peek1			; Yes
+
+Peek0
+	ldx	#N_Peek&$FF		; Complain and quit
+	stx	Ptr0
+	ldx	#N_Peek>>8
+	stx	Ptr0+1
+	ldx	#1			; Number of args expected
+	jmp	MismatchedArgs
+
+Peek1
+	lda	Ptr0			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#0			; Get address of address variable
+	lda	(Ptr0),Y
+	sta	Var
+	iny
+	lda	(Ptr0),Y
+	sta	Var+1
+
+	lda	#0			; Presume address 0
+	sta	Ptr0
+	sta	Ptr0+1
+
+	dey
+	lda	(Var),Y			; Get object type
+
+	cmp	#$40			; False?
+	beq     Peek3
+
+	inc	Ptr0			; Now presume address 1
+
+	cmp	#$C0			; True?
+	beq	Peek3
+
+	tax
+	and	#$40			; Integer type?
+	bne	Peek2
+
+	ldx	#N_Peek&$FF		; Complain and quit
+	lda	#N_Peek>>8
+	jmp	NotIntegral
+
+Peek2
+	iny
+	lda	(Var),Y			; Get low byte of address
+	sta	Ptr0
+
+	cpx	#$41			; Integer more than one byte?
+	beq	Peek3
+
+	iny
+	lda	(Var),Y			; Get high byte of address
+	sta	Ptr0+1
+
+Peek3
+	ldy	#0			; Do the peek
+	lda	(Ptr0),Y
+	sta	Byt0
+
+	lda	#2			; Allocate 2 bytes for integer
+	sta	Int0
+	lda	#0
+	sta	Int0+1
+	jsr	Alloc
+
+	ldy	#0			; Make it a single-byte integer
+	lda	#$41
+	sta	(Ptr0),Y
+	iny
+	lda	Byt0			; With the peeked value
+	sta	(Ptr0),Y
+
+	ldx	Ptr0			; Return the integer
+	stx	PtrA
+	lda	Ptr0+1
+	sta	PtrA+1
+
+	rts
+
+?Peek	.fcb	TYPE_FUNCTION,Peek&$FF,Peek>>8
+	.fcb	0,0			; Future module object
+	.fcb	TYPE_STRING
+	msg	'<built-in function peek>'
+
+N_Peek	msg	"peek"
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Poke - Write a value to a memory location.
+;
+; Input:
+;	Pargs[0] = integer containing memory address
+;	Pargs[1] = integer containing the value
+;
+; Output:
+;	the value is written to the memory location
+;	A:X and PtrA -> None
+;
+Poke
+	ldx	#N_Poke&$FF		; Check for keyword arguments
+	lda	#N_Poke>>8
+	jsr	DontWantAnyKeywordArgs
+
+	lda	Pargs
+	sta	Ptr0
+	lda	Pargs+1
+	sta	Ptr0+1
+	ora	Pargs
+	beq	Poke0			; No positional arguments
+
+	ldy	#1			; Get number of objects
+	lda	(Pargs),Y
+
+	cmp	#2			; Two positional arguments?
+	beq	Poke1			; Yes
+
+Poke0
+	ldx	#N_Poke&$FF		; Complain and quit
+	stx	Ptr0
+	ldx	#N_Poke>>8
+	stx	Ptr0+1
+	ldx	#2			; Number of args expected
+	jmp	MismatchedArgs
+
+Poke1
+	lda	Ptr0			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#0			; Get address of address variable
+	lda	(Ptr0),Y
+	sta	Var
+	iny
+	lda	(Ptr0),Y
+	sta	Var+1
+
+	lda	#0			; Presume address 0
+	sta	Ptr1
+	sta	Ptr1+1
+
+	dey
+	lda	(Var),Y			; Get object type
+
+	cmp	#$40			; False?
+	beq     Poke4
+
+	inc	Ptr1			; Now presume address 1
+
+	cmp	#$C0			; True?
+	beq	Poke4
+
+	tax
+	and	#$40			; Integer type?
+	bne	Poke3
+
+Poke2
+	ldx	#N_Poke&$FF		; Complain and quit
+	lda	#N_Poke>>8
+	jmp	NotIntegral
+
+Poke3
+	iny
+	lda	(Var),Y			; Get low byte of address
+	sta	Ptr1
+
+	cpx	#$41			; Integer more than one byte?
+	beq	Poke4
+
+	iny
+	lda	(Var),Y			; Get high byte of address
+	sta	Ptr1+1
+
+Poke4
+	lda	Ptr0			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#0			; Get address of value variable
+	lda	(Ptr0),Y
+	sta	Var
+	iny
+	lda	(Ptr0),Y
+	sta	Var+1
+
+	lda	#0			; Presume value 0
+	sta	Byt0
+
+	dey
+	lda	(Var),Y			; Get object type
+
+	cmp	#$40			; False?
+	beq     Poke5
+
+	inc	Byt0			; Now presume address 1
+
+	cmp	#$C0			; True?
+	beq	Poke5
+
+	tax
+	and	#$40			; Integer type?
+	beq	Poke2			; No
+
+	iny
+	lda	(Var),Y			; Get value
+	sta	Byt0
+
+Poke5
+	lda	Byt0
+	ldy	#0			; Do the poke
+	sta	(Ptr1),Y
+
+	ldx	#None&$FF		; Return None
+	stx	PtrA
+	lda	#None>>8
+	sta	PtrA+1
+
+	rts
+
+?Poke	.fcb	TYPE_FUNCTION,Poke&$FF,Poke>>8
+	.fcb	0,0			; Future module object
+	.fcb	TYPE_STRING
+	msg	'<built-in function poke>'
+
+N_Poke	msg	"poke"
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Print
+;
+Print
+	lda	#print.space&$FF	; Set keyword defaults
+	sta	print.sep
+	lda	#print.space>>8
+	sta	print.sep+1
+	lda	#print.newline&$FF
+	sta	print.end
+	lda	#print.newline>>8
+	sta	print.end+1
+
+	; process kargs here
+
+	lda	Kargs			; Check for no keyword arguments
+	ora	Kargs+1
+	bne	PrintA
+	jmp	PrintG
+
+PrintA
+	lda	Kargs			; Get address of next object
+	sta	Ptr3			; Note: increment before use
+	lda	Kargs+1
+	sta	Ptr3+1
+
+	ldy	#1			; Get number of objects
+	lda	(Kargs),Y
+	sta	Int3
+	lda	#0
+	sta	Int3+1
+
+	lda	Int3			; Any more objects?
+	ora	Int3+1
+	bne	printB
+
+	jmp	printF
+
+printB
+	lda	Int3			; Decrement object count
+	sec
+	sbc	#1
+	sta	Int3
+	lda	Int3+1
+	sbc	#0
+	sta	Int3+1
+
+	lda	Ptr3			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+	ldy	#0			; Get next object
+	lda	(Ptr3),Y
+	sta	Ptr0
+	iny
+	lda	(Ptr3),Y
+	sta	Ptr0+1
+
+	lda	(Ptr0),Y		; Get string length
+	cmp	#3			; Something other than three invalid
+	bne	printD
+
+	iny				; Get first character
+	iny
+	lda	(Ptr0),Y
+
+	cmp	#'s'			; Beginning of 'sep'?
+	bne	printC
+
+	iny
+	lda	(Ptr0),Y
+	cmp	#'e'
+	bne	printD
+
+	iny
+	lda	(Ptr0),Y
+	cmp	#'p'
+	bne	printD
+
+	ldy	#2			; Accept sep=
+	lda	(Ptr3),Y
+	sta	print.sep
+	iny
+	lda	(Ptr3),Y
+	sta	print.sep+1
+
+	jmp	printE
+
+printC
+	cmp	#'e'			; Beginning of 'end'?
+	bne	printC
+
+	iny
+	lda	(Ptr0),Y
+	cmp	#'n'
+	bne	printD
+
+	iny
+	lda	(Ptr0),Y
+	cmp	#'d'
+	bne	printD
+
+	ldy	#2			; Accept end=
+	lda	(Ptr3),Y
+	sta	print.end
+	iny
+	lda	(Ptr3),Y
+	sta	print.end+1
+
+	jmp	printE
+
+printD
+	ldx	#M_TypeError&$FF
+	lda	#M_TypeError>>8
+	jsr	sys.stdout.write
+
+	lda	Ptr0
+	clc
+	adc	#1
+	tax
+	lda	Ptr0+1
+	adc	#0
+	jsr	sys.stdout.write
+
+	ldx	#M_NotKeyword&$FF
+	lda	#M_NotKeyword>>8
+	jsr	sys.stdout.write
+
+	jmp	CRLFExit
+
+printE
+	lda	Ptr3			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+printF
+	lda	Int3			; Any more objects?
+	ora	Int3+1
+	beq	printG
+
+	jmp	printB
+
+printG
+
+	;
+
+	lda	Pargs
+	ora	Pargs+1
+	bne	PrintH
+	jmp	Print6
+
+PrintH
+	lda	Pargs			; Get address of next object
+	sta	Ptr3			; Note: increment before use
+	lda	Pargs+1
+	sta	Ptr3+1
+
+	ldy	#1			; Get number of objects
+	lda	(Pargs),Y
+	sta	Int3
+	lda	#0
+	sta	Int3+1
+
+print0					; Hook for future big tuple type
+print1
+	lda	#1
+	sta	Byt1			; First time
+
+	lda	Int3			; Any more objects?
+	ora	Int3+1
+	bne	print2
+
+	jmp	print6
+
+print2
+	lda	Int3			; Decrement object count
+	sec
+	sbc	#1
+	sta	Int3
+	lda	Int3+1
+	sbc	#0
+	sta	Int3+1
+
+	lda	Ptr3			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr3
+	lda	Ptr3+1
+	adc	#0
+	sta	Ptr3+1
+
+	ldy	#0			; Get next object
+	lda	(Ptr3),Y
+	sta	Ptr0
+	iny
+	lda	(Ptr3),Y
+	sta	Ptr0+1
+
+	lda	Int3+1			; Save my variables
+	pha
+	lda	Int3
+	pha
+	lda	Ptr3+1
+	pha
+	lda	Ptr3
+	pha
+	lda	Byt1
+	pha
+
+	jsr	object.str		; Convert object to string
+
+	pla				; Recover my variables
+	sta	Byt1
+	pla
+	sta	Ptr3
+	pla
+	sta	Ptr3+1
+	pla
+	sta	Int3
+	pla
+	sta	Int3+1
+
+	lda	Byt1			; Is this the first one?
+	bne	print3			; Branch if yes
+
+	lda	print.sep		; Print the separator
+	clc
+	adc	#1
+	tax
+	lda	print.sep+1
+	adc	#0
+	jsr	sys.stdout.write
+
+print3
+	lda	Ptr0			; Print the parg
+	clc
+	adc	#1
+	tax
+	lda	Ptr0+1
+	adc	#0
+	jsr	sys.stdout.write
+
+	ldx	Ptr0			; Remove reference, free if 0
+	lda	Ptr0+1
+	jsr	DeRef
+
+	lda	#0			; No longer the first one
+	sta	Byt1
+
+print4
+	lda	Int3			; Any more objects?
+	ora	Int3+1
+	beq	print6
+
+print5
+	jmp	print2
+
+print6
+	lda	print.end		; Print the end
+	clc
+	adc	#1
+	tax
+	lda	print.end+1
+	adc	#0
+	jsr	sys.stdout.write
+
+PrintZ
+	ldx	#None&$FF		; Return None
+	stx	PtrA
+	lda	#None>>8
+	sta	PtrA+1
+
+	rts
+
+print.sep	.ds	2
+print.end	.ds	2
+print.space	.fcb	TYPE_STRING,1,0,' '
+print.newline	.fcb	TYPE_STRING,2,0,$D,$A
+
+?Print	.fcb	TYPE_FUNCTION,Print&$FF,Print>>8
+	.fcb	0,0			; Future module object
+	.fcb	TYPE_STRING
+	msg	'<built-in function print>'
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Input - Read a line of text
+;
+; Input:
+;	Pargs[0] = optional prompt
+;
+; Output:
+;	A:X and PtrA -> string containing the text
+;
+Input
+	ldx	#N_Input&$FF		; Check for keyword arguments
+	lda	#N_Input>>8
+	jsr	DontWantAnyKeywordArgs
+
+	lda	Pargs
+	sta	Ptr0
+	lda	Pargs+1
+	sta	Ptr0+1
+	ora	Pargs
+	beq	Input1			; No prompt
+
+	ldy	#1			; Get number of objects
+	lda	(Pargs),Y
+
+	beq	Input1			; No prompt
+
+	cmp	#1			; One positional argument?
+	beq	Input0			; Yes
+
+	ldx	#N_Input&$FF		; Complain and quit
+	stx	Ptr0
+	ldx	#N_Input>>8
+	stx	Ptr0+1
+	ldx	#1			; Number of args expected
+	jmp	MismatchedArgs
+
+Input0
+	lda	Ptr0			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#0			; Get address of prompt object
+	lda	(Ptr0),Y
+	tax
+	iny
+	lda	(Ptr0),Y
+	sta	Ptr0+1
+	txa
+	sta	Ptr0
+
+	jsr	object.str		; Convert object to string
+
+	lda	Ptr0			; Print the prompt
+	clc
+	adc	#1
+	tax
+	lda	Ptr0+1
+	adc	#0
+	jsr	sys.stdout.write
+
+	ldx	Ptr0			; Remove reference, free if 0
+	lda	Ptr0+1
+	jsr	DeRef
+
+Input1
+	lda	#Buffer&$FF		; Set pointer to input buffer
+	sta	Ptr2
+	lda	#Buffer>>8
+	sta	Ptr2+1
+
+	ldy	#0
+
+Input2
+	jsr	INCH			; Get a character
+	cmp	#' '
+	bcc	Input3			; Branch if control character
+
+	cpy	#BUFFERMAX		; More room at the inn?
+	bcs	Input2			; Ignore character if full
+
+	jsr	OUTCH			; Echo the character
+
+	sta	(Ptr2),Y		; Store character in buffer
+	iny
+
+	jmp	Input2			; Thank you sir, may I have another?
+
+Input3
+	cmp	#8			; Backspace?
+	beq	Input4
+
+	cmp	#$D			; Carriage return?
+	beq	Input5
+
+	jmp	Input2
+
+Input4
+	cpy	#0			; Line empty?
+	beq	Input2			; Yes, ignore backspace
+
+	dey				; Delete latest character
+
+	jsr	OUTCH			; Erase on screen
+	lda	#' '
+	jsr	OUTCH
+	lda	#8
+	jsr	OUTCH
+
+	jmp	Input2
+
+Input5
+	jsr	OUTCH			; New line on screen
+	lda	#$A
+	jsr	OUTCH
+
+	tya				; Allocate bytes for string
+	pha				; Stash string length
+	pha				; Another
+	clc
+	adc	#3
+	sta	Int0
+	lda	#0
+	sta	Int0+1
+	jsr	Alloc
+
+	lda	Ptr0			; Save string address
+	sta	Ptr3
+	lda	Ptr0+1
+	sta	Ptr3+1
+
+	ldy	#0			; Fill in string header
+	lda	#TYPE_STRING
+	sta	(Ptr0),Y
+	iny
+	pla				; Recover string length
+	sta	(Ptr0),Y
+	iny
+	lda	#0
+	sta	(Ptr0),Y
+
+	lda	Ptr0			; Copy string from buffer
+	clc
+	adc	#3			; Header size
+	sta	Ptr1
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr1+1
+	lda	#Buffer&$FF
+	sta	Ptr0
+	lda	#Buffer>>8
+	sta	Ptr0+1
+	pla				; Recover string length
+	sta	Int0
+	lda	#0
+	sta	Int0+1
+	jsr	MovBlk
+
+	ldx	Ptr3			; Return the string
+	stx	PtrA
+	lda	Ptr3+1
+	sta	PtrA+1
+
+	rts
+
+?Input	.fcb	TYPE_FUNCTION,Input&$FF,Input>>8
+	.fcb	0,0			; Future module object
+	.fcb	TYPE_STRING
+	msg	'<built-in function input>'
+
+N_Input	msg	"input"
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Int - Convert a number to an integer
+;
+; Input:
+;	Pargs[0] = the number or a string containing the number
+;	Pargs[1] = optional number base
+;
+; Output:
+;	A:X and PtrA -> integer containing value of the number
+;
+Int
+	ldx	#N_Int&$FF		; Check for keyword arguments
+	lda	#N_Int>>8
+	jsr	DontWantAnyKeywordArgs
+
+	lda	#10			; Default base is 10
+	sta	Byt2
+
+	ldx	#I_0&$FF		; Prepare to return 0
+	stx	PtrA
+	lda	#I_0>>8
+	sta	PtrA+1
+
+	lda	Pargs
+	sta	Ptr0
+	lda	Pargs+1
+	sta	Ptr0+1
+	ora	Pargs
+	beq	IntA			; No positional arguments
+
+	ldy	#1			; Get number of objects
+	lda	(Pargs),Y
+	sta	Byt1
+	bne	IntB
+
+IntA
+	lda	PtrA+1			; Return 0 if none
+
+	rts
+
+IntB
+	cmp	#3			; More than two positional arguments?
+	bcc	IntC			; No
+
+	ldx	#N_Int&$FF		; Complain and quit
+	stx	Ptr0
+	ldx	#N_Int>>8
+	stx	Ptr0+1
+	ldx	#2			; Max number of args expected
+	jmp	TooManyArgs
+
+IntC
+	lda	Ptr0			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+	lda	Scr3
+	sta	Ptr3
+	lda	Scr3+1
+	sta	Ptr3+1
+
+	ldy	#0			; Get address of number variable
+	lda	(Ptr0),Y
+	sta	Var
+	sta	Ptr4
+	iny
+	lda	(Ptr0),Y
+	sta	Var+1
+	sta	Ptr4+1
+
+	dey
+	lda	(Var),Y			; Get object type
+	beq	IntD			; Is it None?
+
+	cmp	#$40			; False?
+	beq     IntE
+
+	ldx	#I_1&$FF		; Now presume number 1
+	stx	PtrA
+	ldx	#I_1>>8
+	stx	PtrA+1
+
+	cmp	#$C0			; True?
+	beq	IntE
+
+	ldx	#0			; Not converted bool output
+	stx	PtrA
+	stx	PtrA+1
+
+	tax
+	and	#$40			; Integer type?
+	bne	IntE			; Yes
+
+	cpx	#TYPE_STRING		; String type?
+	beq	IntH			; Yes
+
+IntD
+	ldx	#N_Int&$FF		; Complain and quit
+	stx	Ptr0
+	ldx	#N_Int>>8
+	stx	Ptr0+1
+	jmp	NotStringOrNum
+
+IntE
+	lda	Byt1			; Get number of positional arguments
+	cmp	#1			; Base specified?
+	bne	IntG			; Yes
+
+	lda	PtrA+1			; Is it an integer (vs bool)?
+	bne	IntF
+
+	lda	Ptr4			; Pass an existing integer through
+	sta	PtrA
+	lda	Ptr4+1
+	sta	PtrA+1
+
+	jsr	AddRef			; Increment reference count
+
+IntF
+	ldx	PtrA
+	lda	PtrA+1
+
+	rts
+
+IntG
+	ldx	#N_Int&$FF		; Complain and quit
+	stx	Ptr0
+	ldx	#N_Int>>8
+	stx	Ptr0+1
+	jmp	CannotConvertNonString
+
+IntH
+	lda	Ptr0			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#0			; Get address of base
+	lda	(Ptr0),Y
+	sta	Var
+	iny
+	lda	(Ptr0),Y
+	sta	Var+1
+
+	dey
+	lda	(Var),Y			; Get object type
+
+	cmp	#$40			; False?
+	beq     IntK
+
+	cmp	#$C0			; True?
+	beq	IntI
+
+	tax
+	and	#$40			; Integer type?
+	bne	IntJ
+
+IntI
+	ldx	#N_Int&$FF		; Complain and quit
+	lda	#N_Int>>8
+	jmp	NotIntegral
+
+IntJ
+	txa				; Single byte integer?
+	cmp	#$41
+	beq	IntL			; Yes
+
+IntK
+	ldx	#N_Int&$FF		; Complain and quit
+	stx	Ptr0
+	lda	#N_Int>>8
+	sta	Ptr0+1
+	jmp	BadBase
+
+IntL
+	iny				; Get the integer
+	lda	(Var),Y
+	beq	IntM			; Base 0 OK
+
+	cmp	#1
+	beq	IntK			; Base 1 bad
+
+	cmp	#37
+	bcs	IntK			; Base >= 37 bad
+
+IntM
+	ldy	#0			; Initialize number to zero
+	lda	#0
+	sta	(Scr3),Y
+
+	sta	Int2+1
+	lda	#1
+	sta	Int2
+
+	ldy	#1			; Get length of string
+	lda	(Ptr4),Y
+	sta	Int4
+	iny
+	lda	(Ptr4),Y
+	sta	Int4+1
+	ora	Int4
+	beq	IntR			; Empty string is an error, not 0
+
+	clc				; Point to first character
+	lda	Ptr4
+	adc	#3
+	sta	Ptr4
+	lda	Ptr4+1
+	adc	#0
+	sta	Ptr4+1
+
+IntN
+	lda	Int4			; More of the string?
+	ora	Int4+1
+	bne	IntO
+
+	jmp	IntY
+
+IntO
+	ldy	#0			; Get next character from the string
+	lda	(Ptr4),Y
+
+	cmp	'a'
+	bcc	IntP
+
+	sec
+	sbc	#'a'-10
+	jmp	IntS
+
+IntP
+	cmp	'A'
+	bcc	IntQ
+
+	sec
+	sbc	#'A'-10
+	jmp	IntS
+
+IntQ
+	cmp	#'9'+1
+	bcs	IntR
+
+	cmp	#'0'
+	bcc	IntR
+
+	sec
+	sbc	#'0'
+	jmp	IntS
+
+IntR
+	ldx	#N_Int&$FF		; Complain and quit
+	stx	Ptr0
+	lda	#N_Int>>8
+	sta	Ptr0+1
+	jmp	InvalidLiteral
+
+IntS
+	cmp	Byt2			; Too big for the base?
+	bcs	IntQ
+
+	pha				; Save new digit
+
+	pla				; ecover new digit
+
+IntY
+
+IntZ
+	jsr	int.Condense
+
+	jmp	int.finish
+
+?Int	.fcb	TYPE_FUNCTION,Int&$FF,Int>>8
+	.fcb	0,0			; Future module object
+	.fcb	TYPE_STRING
+	msg	'<built-in function int>'
+
+N_Int	msg	"int"
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Undefined variable message
+;
+Undef	ldx	#M_NotDef&$FF
+	lda	#M_NotDef>>8
+	jsr	sys.stdout.write
+
+	lda	Var
+	clc
+	adc	#2
+	tax
+	lda	Var+1
+	adc	#0
+	jsr	sys.stdout.write
+
+	ldx	#M_NotDef2&$FF
+	lda	#M_NotDef2>>8
+
+PutStrCRLF
+	jsr	sys.stdout.write
+
+CRLFExit
+	jsr	PCRLF
+
+	jmp	sys.exit		; Exit the program
+
+PCRLF	lda	#13
+	jsr	OUTCH
+	lda	#10
+	jsr	OUTCH
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; GetRandom - Generate the next random number
+;
+; Input:
+;	Rand = seed
+;
+; Output:
+;	A:X is the next number
+;
+GetRandom
+	lda	Rand
+	lsr	A
+	rol	Rand+1
+	bcc	GetRandom0
+
+	eor	#$B4
+
+GetRandom0
+	sta	Rand
+	tax
+	eor	Rand+1
+
+	rts
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; randint - return a random number
+;
+; Input:
+;	Pargs[0] = integer containing starting number
+;	Pargs[1] = integer containing ending number
+;
+; Output:
+;	A:X and PtrA -> integer containing the number
+;
+Randint
+	ldx	#N_Randint&$FF		; Check for keyword arguments
+	lda	#N_Randint>>8
+	jsr	DontWantAnyKeywordArgs
+
+	lda	Pargs
+	sta	Ptr0
+	lda	Pargs+1
+	sta	Ptr0+1
+	ora	Pargs
+	beq	Randint0		; No positional arguments
+
+	ldy	#1			; Get number of objects
+	lda	(Pargs),Y
+
+	cmp	#2			; Two positional arguments?
+	beq	Randint1		; Yes
+
+Randint0
+	ldx	#N_Randint&$FF		; Complain and quit
+	stx	Ptr0
+	ldx	#N_Randint>>8
+	stx	Ptr0+1
+	ldx	#2			; Number of args expected
+	jmp	MismatchedArgs
+
+Randint1
+	lda	Ptr0			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#0			; Get address of start number
+	lda	(Ptr0),Y
+	sta	Ptr1
+	iny
+	lda	(Ptr0),Y
+	sta	Ptr1+1
+
+	lda	Ptr0			; Increment object pointer
+	clc
+	adc	#2
+	sta	Ptr0
+	lda	Ptr0+1
+	adc	#0
+	sta	Ptr0+1
+
+	ldy	#0			; Get address of end number
+	lda	(Ptr0),Y
+	tax
+	iny
+	lda	(Ptr0),Y
+	sta	Ptr0+1
+	stx	Ptr0
+
+	jsr	ConvertBool0
+	bcs	Randint2		; None of the above
+
+	jsr	ConvertBool1
+	bcs	Randint2		; None of the above
+
+	jsr	FinishConvertBool
+
+	lda	Ptr1			; Save start number to add later
+	sta	Ptr6
+	lda	Ptr1+1
+	sta	Ptr6+1
+
+	jsr	int.__sub__		; Calculate size of range
+
+	jmp	Randint4
+
+Randint2
+	ldx	#N_Randint&$FF		; Report unsupported types
+	lda	#N_Randint>>8
+	jmp	NotIntegral
+
+Randint3
+	ldx	#M_ValueError&$FF
+	lda	#M_ValueError>>8
+	jsr	sys.stdout.write
+
+	ldx	#M_StartBigger&$FF
+	lda	#M_StartBigger>>8
+	jsr	sys.stdout.write
+
+	jmp	CRLFExit
+
+Randint4
+	clc				; Check sign of difference
+	lda	Int2
+	adc	Scr3
+	sta	Ptr0
+	lda	Int2+1
+	adc	Scr3+1
+	sta	Ptr0+1
+	sec
+	lda	Ptr0
+	sbc	#1
+	sta	Ptr0
+	lda	Ptr0+1
+	sbc	#0
+	sta	Ptr0+1
+	ldy	#0
+	lda	(Ptr0),Y
+	bmi	Randint3		; Bad range if negative
+
+	clc				; Ensure Scr2 is big enough
+	lda	Int2
+	adc	#2
+	sta	Int2
+	lda	Int2+1
+	adc	#0
+	sta	Int2+1
+	lda	#Scr2&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr2>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int2			; Zero it
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+	lda	Scr2
+	sta	Ptr0
+	lda	Scr2+1
+	sta	Ptr0+1
+	lda	#0
+	jsr	SetBlk
+
+	lda	Scr2			; Make it 1
+	sta	Ptr0
+	lda	Scr2+1
+	sta	Ptr0+1
+	lda	#1
+	ldy	#0
+	sta	(Scr2),Y
+
+	lda	Scr3			; Add to range to include end point
+	sta	Ptr1
+	lda	Scr3+1
+	sta	Ptr1+1
+	sec
+	lda	Int2
+	sbc	#2
+	sta	Int0
+	lda	Int2+1
+	sbc	#0
+	sta	Int0+1
+	jsr	IntAdd
+
+	lda	#Scr3&$FF		; Verify scratch space length
+	sta	Ptr3
+	lda	#Scr3>>8
+	sta	Ptr3+1
+	jsr	scratch.realloc
+
+	lda	Int2			; Zero it
+	sta	Int0
+	lda	Int2+1
+	sta	Int0+1
+	lda	Scr3
+	sta	Ptr0
+	lda	Scr3+1
+	sta	Ptr0+1
+	lda	#0
+	jsr	SetBlk
+
+	lda	Scr1			; Point to scratch buffer
+	sta	Ptr2
+	lda	Scr1+1
+	sta	Ptr2+1
+
+	jsr	GetRandom		; Generate a random number
+
+	ldy	#1			; Store as two byte unsigned number
+	sta	(Ptr2),Y
+	dey
+	txa
+	sta	(Ptr2),Y
+
+	lda	#2			; Random number is the multiplier
+	sta	Int3
+	lda	#0
+	sta	Int3+1
+
+	lda	Scr2			; Range is the multiplicand
+	sta	Ptr4
+	lda	Scr2+1
+	sta	Ptr4+1
+
+	jsr	IntMul
+
+	clc				; Prepare to copy number
+	lda	Scr3			; Discarding lower two bytes
+	adc	#2
+	sta	Ptr0
+	lda	Scr3+1
+	adc	#0
+	sta	Ptr0+1
+	sec
+	lda	Int2
+	sbc	#2
+	sta	Int2
+	sta	Int0
+	lda	Int2+1
+	sbc	#0
+	sta	Int2+1
+	sta	Int0+1
+
+	lda	Int2+1
+	bne	Randint5		; It is a big integer
+	lda	Int2
+	cmp	#$40
+	bcs	Randint5
+
+	lda	Int2			; Make a small integer in Scr1
+	ora	#$40
+	ldy	#0
+	sta	(Scr1),Y
+
+	clc
+	lda	Scr1
+	adc	#1
+	sta	Ptr1
+	lda	Scr1+1
+	adc	#0
+	sta	Ptr1+1
+	jsr	MovBlk
+
+	jmp	Randint6
+
+Randint5
+	lda	#TYPE_BIGINT
+	ldy	#0
+	sta	(Scr1),Y
+	iny
+	lda	Int2
+	sta	(Scr1),Y
+	iny
+	lda	Int2+1
+	sta	(Scr1),Y
+
+	clc
+	lda	Scr1
+	adc	#3
+	sta	Ptr1
+	lda	Scr1+1
+	adc	#0
+	sta	Ptr1+1
+
+Randint6
+	lda	Ptr6			; Add start number
+	sta	Ptr0
+	lda	Ptr6+1
+	sta	Ptr0+1
+	lda	Scr1
+	sta	Ptr1
+	lda	Scr1+1
+	sta	Ptr1+1
+	jsr	int.__add__
+
+	jmp	int.finish
+
+?Randint	.fcb	TYPE_FUNCTION,Randint&$FF,Randint>>8
+	.fcb	0,0			; Future module object
+	.fcb	TYPE_STRING
+	msg	'<built-in function randint>'
+
+N_Randint	msg	"randint"
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Constant literals.
+;
+S_Empty	.fcb	TYPE_STRING
+	msg	''
+
+S_None	.fcb	TYPE_STRING
+	msg	'None'
+
+S_True	.fcb	TYPE_STRING
+	msg	'True'
+
+S_False	.fcb	TYPE_STRING
+	msg	'False'
+
+S_sep	.fcb	TYPE_STRING
+	msg	'sep'
+
+S_end	.fcb	TYPE_STRING
+	msg	'end'
+
+None	.fcb	0
+
+False	.fcb	$40
+
+True	.fcb	$C0
+
+I_0	.fcb	$41
+	.fcb	$00
+
+I_1	.fcb	$41
+	.fcb	$01
+
+;;< Before the Python literals
+
+Pargs0	.fcb	TYPE_TUPLE
+	.fcb	0
+
+Pargs1	.fcb	TYPE_TUPLE
+	.fcb	1
+	.fcb	0,0
+
+Pargs2	.fcb	TYPE_TUPLE
+	.fcb	2
+	.fcb	0,0
+
+Pargs3	.fcb	TYPE_TUPLE
+	.fcb	3
+	.fcb	0,0
+	.fcb	0,0
+	.fcb	0,0
+
+Kargs0	.fcb	TYPE_DICT
+	.fcb	0
+
+Kargs1	.fcb	TYPE_DICT
+	.fcb	1
+	.fcb	S_sep&$FF,S_sep>>8
+	.fcb	S_comma&$FF,S_comma>>8
+
+Kargs2	.fcb	TYPE_DICT
+	.fcb	2
+	.fcb	S_sep&$FF,S_sep>>8
+	.fcb	S_comma&$FF,S_comma>>8
+	.fcb	S_end&$FF,S_end>>8
+	.fcb	S_period&$FF,S_period>>8
+
+B0000	.fcb	$C0			; True
+
+B0001	.fcb	$40			; False
+
+I0000	.fcb	$42			; Integer
+	.fcb	1&$FF
+	.fcb	1>>8
+
+I0001	.fcb	$42			; Integer
+	.fcb	2&$FF
+	.fcb	2>>8
+
+I0002	.fcb	$42			; Integer
+	.fcb	3&$FF
+	.fcb	3>>8
+
+;I0003	.fcb	$48			; Integer
+I0003	.fcb	$47			; Integer
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$7F
+
+J0000	.fcb	TYPE_BIGINT		; Integer
+	.fcb	8,0
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$FF
+	.fcb	$7F
+
+S_comma	.fcb	TYPE_STRING
+	msg	','
+
+S_period	.fcb	TYPE_STRING
+	msg	'.'
+
+S0000	.fcb	TYPE_STRING
+	msg	'Hello world.'
+
+S0001	.fcb	TYPE_STRING
+	msg	'One'
+
+S0002	.fcb	TYPE_STRING
+	msg	'Two'
+
+S0003	.fcb	TYPE_STRING
+	msg	'Three'
+
+T0000	.fcb	TYPE_TUPLE
+	.fcb	0
+
+T0001	.fcb	TYPE_TUPLE
+	.fcb	1
+	.fcb	I0000&$FF,I0000>>8
+
+T0002	.fcb	TYPE_TUPLE
+	.fcb	2
+	.fcb	I0000&$FF,I0000>>8
+	.fcb	I0001&$FF,I0001>>8
+
+T0003	.fcb	TYPE_TUPLE
+	.fcb	3
+	.fcb	I0000&$FF,I0000>>8
+	.fcb	I0001&$FF,I0001>>8
+	.fcb	I0002&$FF,I0002>>8
+
+T0004	.fcb	TYPE_TUPLE
+	.fcb	4
+	.fcb	I0000&$FF,I0000>>8
+	.fcb	I0001&$FF,I0001>>8
+	.fcb	I0002&$FF,I0002>>8
+	.fcb	I0003&$FF,I0003>>8
+
+T0005	.fcb	TYPE_TUPLE
+	.fcb	2
+	.fcb	T0003&$FF,T0003>>8
+	.fcb	I0003&$FF,I0003>>8
+
+T0006	.fcb	TYPE_TUPLE
+	.fcb	3
+	.fcb	S0001&$FF,S0001>>8
+	.fcb	S0002&$FF,S0002>>8
+	.fcb	S0003&$FF,S0003>>8
+
+U0000	.fcb	TYPE_BIGTUPLE
+	.fcb	3,0
+	.fcb	I0000&$FF,I0000>>8
+	.fcb	I0001&$FF,I0001>>8
+	.fcb	I0002&$FF,I0002>>8
+
+Z0000	.fcb	TYPE_LIST
+	.fcb	3
+	.fcb	I0000&$FF,I0000>>8
+	.fcb	I0001&$FF,I0001>>8
+	.fcb	I0002&$FF,I0002>>8
+
+Y0000	.fcb	TYPE_BIGLIST
+	.fcb	3,0
+	.fcb	I0000&$FF,I0000>>8
+	.fcb	I0001&$FF,I0001>>8
+	.fcb	I0002&$FF,I0002>>8
+
+D0000	.fcb	TYPE_DICT
+	.fcb	3
+	.fcb	S0001&$FF,S0001>>8,I0000&$FF,I0000>>8
+	.fcb	S0002&$FF,S0002>>8,I0001&$FF,I0001>>8
+	.fcb	S0003&$FF,S0003>>8,I0002&$FF,I0002>>8
+
+E0000	.fcb	TYPE_BIGDICT
+	.fcb	3,0
+	.fcb	S0001&$FF,S0001>>8,I0000&$FF,I0000>>8
+	.fcb	S0002&$FF,S0002>>8,I0001&$FF,I0001>>8
+	.fcb	S0003&$FF,S0003>>8,I0002&$FF,I0002>>8
+
+;;> After the Python literals
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;
+; Python variables.
+;
+
+;;< Before the Python variables
+
+_A	.fcb	0,0
+	msg	'A'
+
+_B	.fcb	0,0
+	msg	'B'
+
+_Print	.fcb	?Print&$FF,?Print>>8
+	msg	'print'
+
+Zero_LIst	.word	0
+Init_List	.word	0
+
+;;> After the Python variables
+
+Buffer	ds	BUFFERMAX
+
+BSS
+
+HeapE	ds	2
+
+Heap
+
+	.end	Begin
